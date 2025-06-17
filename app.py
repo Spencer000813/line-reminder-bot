@@ -29,30 +29,57 @@ def callback():
         abort(400)
 
     return 'OK'
+# --- 新增功能：查詢今天 / 本週 / 下週提醒 ---
+def filter_reminders(mode):
+    now = datetime.datetime.now()
+    if mode == "today":
+        return [r for r in reminders if r["time"].date() == now.date()]
+    elif mode == "this_week":
+        start = now - datetime.timedelta(days=now.weekday())
+        end = start + datetime.timedelta(days=6)
+        return [r for r in reminders if start.date() <= r["time"].date() <= end.date()]
+    elif mode == "next_week":
+        start = now + datetime.timedelta(days=(7 - now.weekday()))
+        end = start + datetime.timedelta(days=6)
+        return [r for r in reminders if start.date() <= r["time"].date() <= end.date()]
+    return []
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
 
-    if text.startswith("查詢提醒"):
-        if reminders:
-            reply = "目前提醒：\n" + "\n".join([f"{r['time']} - {r['task']}" for r in reminders])
+        text = event.message.text.strip()
+    user_id = event.source.user_id
+
+    # 判斷是否為進階查詢指令
+    if "今天有什麼行程" in text:
+        today = filter_reminders("today")
+        if today:
+            reply = "📅 今天行程：\n" + "\n".join([f"- {r['time'].strftime('%H:%M')} {r['task']}" for r in today])
         else:
-            reply = "目前沒有任何提醒喔！"
+            reply = "今天沒有安排任何提醒喔！"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    if text.startswith("取消"):
-        for r in reminders:
-            if r['raw'].startswith(text.replace("取消", "").strip()):
-                reminders.remove(r)
-                reply = f"已取消提醒：{r['raw']}"
-                break
+    if "這週提醒" in text or "這週行程" in text:
+        this_week = filter_reminders("this_week")
+        if this_week:
+            reply = "📅 本週提醒：\n" + "\n".join([f"- {r['time'].strftime('%m/%d %H:%M')} {r['task']}" for r in this_week])
         else:
-            reply = "找不到要取消的提醒。"
+            reply = "本週還沒有任何提醒喔！"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
+
+    if "下週" in text:
+        next_week = filter_reminders("next_week")
+        if next_week:
+            reply = "📅 下週提醒：\n" + "\n".join([f"- {r['time'].strftime('%m/%d %H:%M')} {r['task']}" for r in next_week])
+        else:
+            reply = "下週目前也沒有提醒，可以安排一下喔！"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+
 
     try:
         task_time, task_content = parse_text(text)
