@@ -45,11 +45,9 @@ def filter_reminders(mode):
     return []
 
 @handler.add(MessageEvent, message=TextMessage)
+@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text.strip()
-    user_id = event.source.user_id
-
-        text = event.message.text.strip()
     user_id = event.source.user_id
 
     # 判斷是否為進階查詢指令
@@ -80,20 +78,43 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
+    # 原本的提醒設定語法
+    if text.startswith("查詢提醒"):
+        if reminders:
+            reply = "目前提醒：\n" + "\n".join([f"{r['time']} - {r['task']}" for r in reminders])
+        else:
+            reply = "目前沒有任何提醒喔！"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+
+    if text.startswith("取消"):
+        for r in reminders:
+            if r['raw'].startswith(text.replace("取消", "").strip()):
+                reminders.remove(r)
+                save_reminders()
+                reply = f"已取消提醒：{r['raw']}"
+                break
+        else:
+            reply = "找不到要取消的提醒。"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
 
     try:
         task_time, task_content = parse_text(text)
-        reminders.append({
+        new_reminder = {
             'time': task_time,
             'task': task_content,
             'user_id': user_id,
             'raw': text
-        })
+        }
+        reminders.append(new_reminder)
+        save_reminders()
         reply = f"提醒已設定：{task_time.strftime('%m/%d %H:%M')} {task_content}"
     except Exception as e:
         reply = "請輸入正確格式，例如：6/17 晚上9點45分 傳心"
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
 
 
 def parse_text(text):
