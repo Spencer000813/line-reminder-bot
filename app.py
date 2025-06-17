@@ -48,7 +48,23 @@ def filter_reminders(mode):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text.strip()
-    user_id = event.source.user_id
+        if event.source.type == "user":
+        if event.source.type == "user":
+    target_id = event.source.user_id
+elif event.source.type == "group":
+    target_id = event.source.group_id
+elif event.source.type == "room":
+    target_id = event.source.room_id
+else:
+    target_id = None
+
+    elif event.source.type == "group":
+        target_id = event.source.group_id
+    elif event.source.type == "room":
+        target_id = event.source.room_id
+    else:
+        target_id = None
+
 
     # 判斷是否為進階查詢指令
     if "今天有什麼行程" in text:
@@ -104,7 +120,7 @@ def handle_message(event):
         new_reminder = {
             'time': task_time,
             'task': task_content,
-            'user_id': user_id,
+            'user_id': target_id,
             'raw': text
         }
         reminders.append(new_reminder)
