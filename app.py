@@ -1,98 +1,104 @@
+
 import os
-import datetime
-import gspread
+import json
+from datetime import datetime, timedelta
 from flask import Flask, request, abort
-from oauth2client.service_account import ServiceAccountCredentials
+
+import gspread
+from google.oauth2.service_account import Credentials
+
 from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import threading
-import time
 
-app = Flask(__name__)
-
-# 使用環境變數
+# LINE 機器人驗證資訊（從環境變數中讀取）
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 建立 Google Sheet API 連線
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-client = gspread.authorize(creds)
-sheet = client.open_by_key(GOOGLE_SPREADSHEET_ID).sheet1
+# 授權 Google Sheets
+SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+credentials = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
+gc = gspread.authorize(credentials)
 
-def get_schedule_for_range(start_date, end_date):
-    rows = sheet.get_all_values()[1:]  # 排除標題列
-    result = []
+# 開啟指定 Google Sheet
+spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
+sheet = gc.open_by_key(spreadsheet_id).sheet1
 
-    for row in rows:
-        if len(row) < 3:
-            continue
-        date_str, time_str, content = row[0], row[1], row[2]
+app = Flask(__name__)
 
-        try:
-            date_obj = datetime.datetime.strptime(date_str, "%Y/%m/%d").date()
-        except:
-            continue
-
-        if start_date <= date_obj <= end_date:
-            result.append(f"{date_str} {time_str}：{content}")
-
-    return "\n".join(result) if result else "目前沒有行程喔！"
-
-def start_countdown(user_id):
-    def countdown():
-        for i in range(3, 0, -1):
-            line_bot_api.push_message(user_id, TextSendMessage(text=f"倒數 {i} 分鐘"))
-            time.sleep(60)
-        line_bot_api.push_message(user_id, TextSendMessage(text="倒數結束！"))
-    threading.Thread(target=countdown).start()
+@app.route("/")
+def home():
+    return "LINE Reminder Bot is running."
 
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
-    except Exception as e:
-        print("Webhook 錯誤:", e)
+    except InvalidSignatureError:
         abort(400)
-
     return "OK"
+
+# 關鍵字查詢條件（完全符合）
+EXACT_MATCHES = {
+    "今天有哪些行程": "today",
+    "明天有哪些行程": "tomorrow",
+    "本週有哪些行程": "this_week",
+    "下週有哪些行程": "next_week",
+    "倒數計時": "countdown",
+    "開始倒數": "countdown",
+    "說哈囉": "coffee",
+    "你好": "coffee"
+}
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    text = event.message.text.strip()
-    reply_token = event.reply_token
-    user_id = event.source.user_id
-    today = datetime.date.today()
-    weekday = today.weekday()
+    user_text = event.message.text.strip()
+    reply_type = EXACT_MATCHES.get(user_text)
 
-    if text == "今天有哪些行程":
-        reply = get_schedule_for_range(today, today)
-    elif text == "明天有哪些行程":
-        reply = get_schedule_for_range(today + datetime.timedelta(days=1), today + datetime.timedelta(days=1))
-    elif text == "本週有哪些行程":
-        start = today - datetime.timedelta(days=weekday)
-        end = start + datetime.timedelta(days=6)
-        reply = get_schedule_for_range(start, end)
-    elif text == "下週有哪些行程":
-        start = today + datetime.timedelta(days=(7 - weekday))
-        end = start + datetime.timedelta(days=6)
-        reply = get_schedule_for_range(start, end)
-    elif text in ["倒數計時", "開始倒數"]:
-        start_countdown(user_id)
-        return
-    elif text in ["哈囉", "你好"]:
-        reply = "要請我喝杯咖啡嗎？"
+    if not reply_type:
+        return  # 非完全符合關鍵字，不回覆
+
+    if reply_type == "coffee":
+        reply = "要請我喝杯咖啡嗎?"
+    elif reply_type == "countdown":
+        reply = "倒數計時三分鐘開始..."
     else:
-        return  # 完全不符合就不回覆
+        reply = get_schedule(reply_type)
 
-    line_bot_api.reply_message(reply_token, TextSendMessage(text=reply))
+    if reply:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+def get_schedule(period):
+    all_rows = sheet.get_all_values()[1:]  # 忽略標題列
+    now = datetime.now()
+    schedules = []
+
+    for row in all_rows:
+        try:
+            date_str, time_str, content, user_id, status = row
+            dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
+        except:
+            continue  # 跳過格式錯誤的列
+
+        if period == "today" and dt.date() == now.date():
+            schedules.append(f"{dt.strftime('%H:%M')} - {content}")
+        elif period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date():
+            schedules.append(f"{dt.strftime('%H:%M')} - {content}")
+        elif period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]:
+            schedules.append(f"{dt.strftime('%m/%d %H:%M')} - {content}")
+        elif period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1]:
+            schedules.append(f"{dt.strftime('%m/%d %H:%M')} - {content}")
+
+    if not schedules:
+        return "目前沒有相關排程。"
+    return "\n".join(schedules)
 
 if __name__ == "__main__":
-    app.run()
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
