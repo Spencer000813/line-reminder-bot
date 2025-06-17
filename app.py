@@ -47,29 +47,36 @@ def filter_reminders(mode):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text.strip()
+    target_id = event.source.user_id if event.source.type == "user" else event.source.group_id
 
-    # 判斷來源 ID（個人、群組、聊天室）
-    if event.source.type == "user":
-        target_id = event.source.user_id
-    elif event.source.type == "group":
-        target_id = event.source.group_id
-    elif event.source.type == "room":
-        target_id = event.source.room_id
-    else:
-        target_id = None
+    # 倒數指令（3分鐘）
+    if text.startswith("倒數開始") or text.startswith("開始倒數"):
+        task_content = text.replace("倒數開始", "").replace("開始倒數", "").strip()
 
+        def send_delayed_message():
+            try:
+                line_bot_api.push_message(target_id, TextSendMessage(text=f"3分鐘已到：{task_content}"))
+            except:
+                pass
+
+        threading.Timer(180, send_delayed_message).start()
+        reply = f"好的，開始倒數：{task_content}（3分鐘後提醒你）"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+
+    # 查詢提醒
     if text.startswith("查詢提醒"):
-        filtered = [r for r in reminders if r['user_id'] == target_id]
-        if filtered:
-            reply = "目前提醒：\n" + "\n".join([f"{r['time']} - {r['task']}" for r in filtered])
+        if reminders:
+            reply = "目前提醒：\n" + "\n".join([f"{r['time']} - {r['task']}" for r in reminders])
         else:
             reply = "目前沒有任何提醒喔！"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
+    # 取消提醒
     if text.startswith("取消"):
         for r in reminders:
-            if r['raw'].startswith(text.replace("取消", "").strip()) and r['user_id'] == target_id:
+            if r['raw'].startswith(text.replace("取消", "").strip()):
                 reminders.remove(r)
                 save_reminders()
                 reply = f"已取消提醒：{r['raw']}"
@@ -79,6 +86,7 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
+    # 新增提醒
     try:
         task_time, task_content = parse_text(text)
         new_reminder = {
