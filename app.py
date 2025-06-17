@@ -49,8 +49,12 @@ def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
 
+    # 最前面先檢查 ID 指令
     if text == "我的ID是？":
-        reply = f"你的 ID 是：{user_id}"
+        if event.source.type == "user":
+            reply = f"你的用戶 ID 是：{user_id}"
+        else:
+            reply = "請私訊我，我才能提供你的用戶 ID"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
