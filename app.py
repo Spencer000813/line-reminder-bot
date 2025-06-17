@@ -5,24 +5,22 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
 import datetime
 import threading
-import json
 import time
+import json
 
 app = Flask(__name__)
 
-# 環境變數設定（Render 上會自動注入）
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 提醒資料儲存路徑
 REMINDERS_FILE = "reminders.json"
 reminders = []
 reminded_today = set()
 
-# 載入提醒資料
+# 載入提醒
 if os.path.exists(REMINDERS_FILE):
     try:
         with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
@@ -36,61 +34,80 @@ if os.path.exists(REMINDERS_FILE):
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
-
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text.strip()
+    source_type = event.source.type
     user_id = event.source.user_id
+    target_id = user_id if source_type == "user" else event.source.group_id
 
-    # 最前面先檢查 ID 指令
-    if text == "我的ID是？":
-        if event.source.type == "user":
-            reply = f"你的用戶 ID 是：{user_id}"
+    # 查詢 ID
+    if "ID" in text:
+        if source_type == "user":
+            reply = f"你的使用者 ID 是：{user_id}"
+        elif source_type == "group":
+            reply = f"這個群組的 ID 是：{event.source.group_id}"
         else:
-            reply = "請私訊我，我才能提供你的用戶 ID"
+            reply = "無法辨識來源類型。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    if text.startswith("查詢提醒"):
-        if reminders:
-            reply = "目前提醒：\n" + "\n".join([f"{r['time']} - {r['task']}" for r in reminders])
-        else:
-            reply = "目前沒有任何提醒喔！"
+    # 倒數計時 3 分鐘
+    if "倒數開始" in text or "開始倒數" in text:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="倒數 3 分鐘開始..."))
+        threading.Timer(180, lambda: line_bot_api.push_message(target_id, TextSendMessage(text="⏰ 3分鐘已到！"))).start()
+        return
+
+    # 聊天對話
+    if text in ["嗨", "你好", "在嗎", "機器人"]:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="要請我喝杯咖啡嗎？"))
+        return
+
+    # 查詢提醒
+    now = datetime.datetime.now()
+    today = now.date()
+    weekday = today.weekday()
+    start_of_week = today - datetime.timedelta(days=weekday)
+    end_of_week = start_of_week + datetime.timedelta(days=6)
+
+    if "今天" in text:
+        filtered = [r for r in reminders if r['time'].date() == today and r['user_id'] == user_id]
+    elif "明天" in text:
+        tomorrow = today + datetime.timedelta(days=1)
+        filtered = [r for r in reminders if r['time'].date() == tomorrow and r['user_id'] == user_id]
+    elif "這週" in text:
+        filtered = [r for r in reminders if start_of_week <= r['time'].date() <= end_of_week and r['user_id'] == user_id]
+    else:
+        filtered = []
+
+    if filtered:
+        reply = "\n".join([f"{r['time'].strftime('%m/%d %H:%M')} - {r['task']}" for r in filtered])
+    elif text.startswith("查詢"):
+        reply = "目前沒有符合的提醒喔！"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    if text.startswith("取消"):
-        for r in reminders:
-            if r['raw'].startswith(text.replace("取消", "").strip()):
-                reminders.remove(r)
-                save_reminders()
-                reply = f"已取消提醒：{r['raw']}"
-                break
-        else:
-            reply = "找不到要取消的提醒。"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-        return
-
-    try:
-        task_time, task_content = parse_text(text)
-        new_reminder = {
-            'time': task_time,
-            'task': task_content,
-            'user_id': user_id,
-            'raw': text
-        }
-        reminders.append(new_reminder)
-        save_reminders()
-        reply = f"提醒已設定：{task_time.strftime('%m/%d %H:%M')} {task_content}"
-    except Exception as e:
-        reply = "請輸入正確格式，例如：6/17 晚上9點45分 傳心"
+    # 設定提醒
+    if not filtered and not text.startswith("查詢"):
+        try:
+            task_time, task_content = parse_text(text)
+            new_reminder = {
+                'time': task_time,
+                'task': task_content,
+                'user_id': target_id,
+                'raw': text
+            }
+            reminders.append(new_reminder)
+            save_reminders()
+            reply = f"提醒已設定：{task_time.strftime('%m/%d %H:%M')} {task_content}"
+        except:
+            reply = "請輸入正確格式，例如：6/17 晚上9點45分 傳心"
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
@@ -125,25 +142,23 @@ def save_reminders():
         ]
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# 後台排程提醒
 def reminder_thread():
     while True:
         now = datetime.datetime.now()
-        # 早上10點提醒當天所有任務
         if now.hour == 10 and now.minute == 0:
-            today = now.date()
             for r in reminders:
-                if r['time'].date() == today and (r['user_id'], today) not in reminded_today:
+                if r['time'].date() == now.date() and (r['user_id'], now.date()) not in reminded_today:
                     try:
-                        line_bot_api.push_message(r['user_id'], TextSendMessage(text=f"你今天有提醒：{r['task']}"))
+                        line_bot_api.push_message(r['user_id'], TextSendMessage(text=f"📌 今日提醒：{r['task']}"))
                     except:
                         pass
-                    reminded_today.add((r['user_id'], today))
+                    reminded_today.add((r['user_id'], now.date()))
 
-        # 正常時間到點提醒
         for r in reminders[:]:
             if now >= r['time']:
                 try:
-                    line_bot_api.push_message(r['user_id'], TextSendMessage(text=f"提醒你：{r['task']}"))
+                    line_bot_api.push_message(r['user_id'], TextSendMessage(text=f"🔔 到時間了：{r['task']}"))
                 except:
                     pass
                 reminders.remove(r)
