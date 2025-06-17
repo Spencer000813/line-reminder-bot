@@ -80,12 +80,29 @@ def get_schedule(period):
     schedules = []
 
     for row in all_rows:
-        try:
-            date_str, time_str, content, user_id, status = row
-            dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
-        except:
-            continue  # 跳過格式錯誤的列
+        if len(row) < 5:
+            continue  # 確保每列至少有五個欄位（避免 IndexError）
 
+        try:
+            date_cell, time_str, content, user_id, status = row
+
+            # 處理日期欄位可能為 datetime 或純字串
+            if isinstance(date_cell, datetime):
+                date_str = date_cell.strftime("%Y/%m/%d")
+            else:
+                date_str = str(date_cell).strip()
+
+            # 時間處理：防止包含空格
+            time_str = str(time_str).strip()
+
+            # 轉為 datetime 物件
+            dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
+
+        except Exception as e:
+            print("❌ 跳過資料列：", row, "| 錯誤：", e)
+            continue
+
+        # 比對時間區段
         if period == "today" and dt.date() == now.date():
             schedules.append(f"{dt.strftime('%H:%M')} - {content}")
         elif period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date():
