@@ -1,22 +1,99 @@
+import os
+import json
+import datetime
+import time
+import threading
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import os
-import datetime
-import threading
-import time
-import json
+
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 app = Flask(__name__)
 
-# 環境變數
+# LINE 機器人基本資訊
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+# 讀取並寫入 Google 憑證檔案
+CREDENTIAL_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+with open("credentials.json", "w") as f:
+    f.write(CREDENTIAL_JSON)
+
+# Google Sheets 初始化
+SCOPE = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+credentials = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
+gc = gspread.authorize(credentials)
+SHEET_NAME = 'LINE提醒排程'
+sheet = gc.open(SHEET_NAME).sheet1
+
+# 文字訊息處理
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    text = event.message.text.strip()
+    source_type = event.source.type
+    target_id = event.source.user_id if source_type == "user" else event.source.group_id
+
+    # 查詢關鍵字
+    now = datetime.datetime.now()
+    if "今天" in text:
+        reply = query_schedule(now.date())
+    elif "明天" in text:
+        reply = query_schedule(now.date() + datetime.timedelta(days=1))
+    elif "這週" in text:
+        monday = now - datetime.timedelta(days=now.weekday())
+        sunday = monday + datetime.timedelta(days=6)
+        reply = query_schedule_range(monday.date(), sunday.date())
+    elif "下週" in text:
+        next_monday = now + datetime.timedelta(days=7 - now.weekday())
+        next_sunday = next_monday + datetime.timedelta(days=6)
+        reply = query_schedule_range(next_monday.date(), next_sunday.date())
+    elif text in ["嗨", "你好", "哈囉"]:
+        reply = "要請我喝杯咖啡嗎？"
+    elif "倒數開始" in text or "開始倒數" in text:
+        reply = "3分鐘倒數開始！等我通知你喔～"
+        threading.Thread(target=countdown_timer, args=(target_id,), daemon=True).start()
+    else:
+        reply = "請輸入「今天」、「明天」、「這週」、「下週」來查詢提醒喔～"
+
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+# 倒數計時
+def countdown_timer(target_id):
+    time.sleep(180)
+    line_bot_api.push_message(target_id, TextSendMessage(text="3分鐘已到！"))
+
+# 查詢單一天提醒
+def query_schedule(target_date):
+    records = sheet.get_all_values()[1:]
+    results = []
+    for row in records:
+        try:
+            row_date = datetime.datetime.strptime(row[0], "%Y/%m/%d").date()
+            if row_date == target_date:
+                results.append(f"{row[1]} - {row[2]}")
+        except:
+            continue
+    return "沒有提醒喔！" if not results else "\n".join(results)
+
+# 查詢範圍提醒
+def query_schedule_range(start_date, end_date):
+    records = sheet.get_all_values()[1:]
+    results = []
+    for row in records:
+        try:
+            row_date = datetime.datetime.strptime(row[0], "%Y/%m/%d").date()
+            if start_date <= row_date <= end_date:
+                results.append(f"{row[0]} {row[1]} - {row[2]}")
+        except:
+            continue
+    return "這段期間沒有提醒。" if not results else "\n".join(results)
+
+# Webhook
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -27,67 +104,6 @@ def callback():
         abort(400)
     return 'OK'
 
-# 儲存倒數計時用戶
-countdown_users = {}
-
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_message = event.message.text.strip()
-    user_id = event.source.user_id
-    group_id = getattr(event.source, "group_id", None)
-    target_id = group_id if group_id else user_id
-
-    now = datetime.datetime.now()
-    today = now.date()
-    tomorrow = today + datetime.timedelta(days=1)
-    weekday = today.weekday()
-
-    # 查詢個人或群組 ID
-    if user_message in ["查ID", "查詢ID", "查詢 id"]:
-        reply = f"你的ID是：{target_id}"
-
-    # 行程查詢
-    elif "今天" in user_message:
-        reply = "請至 Google Sheet 中查詢今天的提醒記錄。"
-    elif "明天" in user_message:
-        reply = "請至 Google Sheet 中查詢明天的提醒記錄。"
-    elif "這週" in user_message:
-        reply = "請至 Google Sheet 中查詢這週的提醒記錄。"
-    elif "下週" in user_message:
-        reply = "請至 Google Sheet 中查詢下週的提醒記錄。"
-
-    # 倒數3分鐘
-    elif user_message in ["倒數開始", "開始倒數"]:
-        if target_id in countdown_users:
-            reply = "已經在倒數中，請稍候。"
-        else:
-            countdown_users[target_id] = True
-            reply = "3分鐘倒數開始。"
-            threading.Thread(target=start_countdown, args=(target_id,), daemon=True).start()
-
-    # 聊天回覆
-    elif user_message.endswith("?") or "嗎" in user_message:
-        reply = "要請我喝杯咖啡嗎？"
-
-    else:
-        reply = "請使用：查ID、倒數開始、今天/明天/這週/下週提醒。"
-
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
-def start_countdown(target_id):
-    time.sleep(180)
-    try:
-        line_bot_api.push_message(target_id, TextSendMessage(text="3分鐘已到"))
-    except:
-        pass
-    countdown_users.pop(target_id, None)
-
-# 自動提醒（由 Google Sheet 負責排程與主動推播，此段保留以後可擴充）
-def dummy_reminder_check():
-    while True:
-        time.sleep(60)
-
-threading.Thread(target=dummy_reminder_check, daemon=True).start()
-
+# 啟動服務
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
