@@ -5,6 +5,8 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
 import datetime
 import threading
+import json
+import time
 
 app = Flask(__name__)
 
@@ -15,8 +17,20 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 儲存提醒資料的地方（記憶體中，重啟會消失）
+# 提醒資料儲存路徑
+REMINDERS_FILE = "reminders.json"
 reminders = []
+reminded_today = set()
+
+# 載入提醒資料
+if os.path.exists(REMINDERS_FILE):
+    try:
+        with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
+            reminders = json.load(f)
+            for r in reminders:
+                r["time"] = datetime.datetime.strptime(r["time"], "%Y-%m-%d %H:%M:%S")
+    except:
+        reminders = []
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -29,41 +43,18 @@ def callback():
         abort(400)
 
     return 'OK'
-# --- 新增功能：查詢今天 / 本週 / 下週提醒 ---
-def filter_reminders(mode):
-    now = datetime.datetime.now()
-    if mode == "today":
-        return [r for r in reminders if r["time"].date() == now.date()]
-    elif mode == "this_week":
-        start = now - datetime.timedelta(days=now.weekday())
-        end = start + datetime.timedelta(days=6)
-        return [r for r in reminders if start.date() <= r["time"].date() <= end.date()]
-    elif mode == "next_week":
-        start = now + datetime.timedelta(days=(7 - now.weekday()))
-        end = start + datetime.timedelta(days=6)
-        return [r for r in reminders if start.date() <= r["time"].date() <= end.date()]
-    return []
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text.strip()
+    user_id = event.source.user_id
 
-    # 查詢個人或群組 ID
-    if text == "查詢我的 ID":
-        if event.source.type == "group":
-            group_id = event.source.group_id
-            line_bot_api.reply_message(
-                event.reply_token, TextSendMessage(text=f"群組 ID 是：\n{group_id}")
-            )
-        else:
-            user_id = event.source.user_id
-            line_bot_api.reply_message(
-                event.reply_token, TextSendMessage(text=f"你的 ID 是：\n{user_id}")
-            )
+    if text == "我的ID是？":
+        reply = f"你的 ID 是：{user_id}"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    # 通用查詢提醒
-    if text == "查詢提醒":
+    if text.startswith("查詢提醒"):
         if reminders:
             reply = "目前提醒：\n" + "\n".join([f"{r['time']} - {r['task']}" for r in reminders])
         else:
@@ -71,7 +62,6 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    # 取消提醒
     if text.startswith("取消"):
         for r in reminders:
             if r['raw'].startswith(text.replace("取消", "").strip()):
@@ -84,17 +74,12 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    # 新增提醒
     try:
         task_time, task_content = parse_text(text)
-        target_id = event.source.user_id
-        if event.source.type == "group":
-            target_id = event.source.group_id
-
         new_reminder = {
             'time': task_time,
             'task': task_content,
-            'user_id': target_id,
+            'user_id': user_id,
             'raw': text
         }
         reminders.append(new_reminder)
@@ -104,8 +89,6 @@ def handle_message(event):
         reply = "請輸入正確格式，例如：6/17 晚上9點45分 傳心"
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
-
 
 def parse_text(text):
     import re
@@ -126,10 +109,33 @@ def parse_text(text):
     task_content = text[m.end():].strip()
     return task_time, task_content
 
+def save_reminders():
+    with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
+        data = [
+            {
+                'time': r['time'].strftime("%Y-%m-%d %H:%M:%S"),
+                'task': r['task'],
+                'user_id': r['user_id'],
+                'raw': r['raw']
+            } for r in reminders
+        ]
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def reminder_thread():
     while True:
         now = datetime.datetime.now()
+        # 早上10點提醒當天所有任務
+        if now.hour == 10 and now.minute == 0:
+            today = now.date()
+            for r in reminders:
+                if r['time'].date() == today and (r['user_id'], today) not in reminded_today:
+                    try:
+                        line_bot_api.push_message(r['user_id'], TextSendMessage(text=f"你今天有提醒：{r['task']}"))
+                    except:
+                        pass
+                    reminded_today.add((r['user_id'], today))
+
+        # 正常時間到點提醒
         for r in reminders[:]:
             if now >= r['time']:
                 try:
@@ -137,9 +143,9 @@ def reminder_thread():
                 except:
                     pass
                 reminders.remove(r)
+                save_reminders()
         time.sleep(30)
 
-import time
 threading.Thread(target=reminder_thread, daemon=True).start()
 
 if __name__ == "__main__":
