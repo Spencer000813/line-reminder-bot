@@ -57,16 +57,26 @@ def handle_message(event):
     user_text = event.message.text.strip()
     lower_text = user_text.lower()
 
-    reply_type = next((v for k, v in EXACT_MATCHES.items() if k.lower() == lower_text), None)
-
-    if reply_type == "coffee":
-        reply = "要請我喝杯咖啡嗎?"
-    elif reply_type == "countdown":
-        reply = "倒數計時三分鐘開始...\n（3分鐘後我會提醒你：3分鐘已到）"
-    elif reply_type:
-        reply = get_schedule(reply_type, event.source.user_id)
+    # 若為「如何新增排程」問題，回覆教學格式
+    if lower_text == "如何新增排程":
+        reply = (
+            "📌 新增排程請使用以下格式：\n"
+            "月/日 時:分 行程內容\n\n"
+            "✅ 範例：\n"
+            "7/1 14:00 帶小孩看醫生\n"
+            "（也可寫成 2025/7/1 14:00 客戶拜訪）"
+        )
     else:
-        reply = try_add_schedule(user_text, event.source.user_id)
+        reply_type = next((v for k, v in EXACT_MATCHES.items() if k.lower() == lower_text), None)
+
+        if reply_type == "coffee":
+            reply = "要請我喝杯咖啡嗎?"
+        elif reply_type == "countdown":
+            reply = "倒數計時三分鐘開始...\n（3分鐘後我會提醒你：3分鐘已到）"
+        elif reply_type:
+            reply = get_schedule(reply_type, event.source.user_id)
+        else:
+            reply = try_add_schedule(user_text, event.source.user_id)
 
     if reply:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
