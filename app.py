@@ -1,7 +1,5 @@
-
 import os
 import json
-import re
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 
@@ -12,18 +10,17 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
-# LINE 驗證
+# LINE 機器人驗證資訊
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Google Sheet 授權
+# Google Sheets 授權
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 credentials = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
 gc = gspread.authorize(credentials)
-
 spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
 sheet = gc.open_by_key(spreadsheet_id).sheet1
 
@@ -43,7 +40,7 @@ def callback():
         abort(400)
     return "OK"
 
-# 查詢命令
+# 關鍵字指令（不分大小寫比對）
 EXACT_MATCHES = {
     "今天有哪些行程": "today",
     "明天有哪些行程": "tomorrow",
@@ -58,34 +55,23 @@ EXACT_MATCHES = {
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text.strip()
-    reply_type = EXACT_MATCHES.get(user_text.lower())
+    lower_text = user_text.lower()
 
-    # 查詢功能
-    if reply_type:
-        if reply_type == "coffee":
-            reply = "要請我喝杯咖啡嗎?"
-        elif reply_type == "countdown":
-            reply = "倒數計時三分鐘開始..."
-            # 延遲三分鐘後再發送結束訊息
-            # 設計上這裡應該交給排程服務觸發
-        else:
-            reply = get_schedule(reply_type)
-        if reply:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-        return
+    reply_type = next((v for k, v in EXACT_MATCHES.items() if k.lower() == lower_text), None)
 
-    # 嘗試解析為新增排程
-    parsed = parse_schedule_input(user_text)
-    if parsed:
-        add_schedule_to_sheet(parsed["date"], parsed["remind_time"], parsed["content"], event.source.user_id)
-        reply = f"✅ 行程已新增：
-**{parsed['date']}**
-{parsed['content']}"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    if reply_type == "coffee":
+        reply = "要請我喝杯咖啡嗎?"
+    elif reply_type == "countdown":
+        reply = "倒數計時三分鐘開始...\n（3分鐘後我會提醒你：3分鐘已到）"
+    elif reply_type:
+        reply = get_schedule(reply_type, event.source.user_id)
     else:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 無法解析這句話的行程內容，請使用：6/21 下午3點半 看牙醫 這樣的格式。"))
+        reply = try_add_schedule(user_text, event.source.user_id)
 
-def get_schedule(period):
+    if reply:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+def get_schedule(period, requester_id):
     all_rows = sheet.get_all_values()[1:]
     now = datetime.now()
     schedules = []
@@ -95,56 +81,54 @@ def get_schedule(period):
             continue
         try:
             date_cell, time_str, content, user_id, status = row
-            if isinstance(date_cell, datetime):
-                date_str = date_cell.strftime("%Y/%m/%d")
-            else:
-                date_str = str(date_cell).strip()
-            time_str = str(time_str).strip()
-            dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
+            date_str = date_cell if isinstance(date_cell, str) else date_cell.strftime("%Y/%m/%d")
+            dt = datetime.strptime(f"{date_str.strip()} {time_str.strip()}", "%Y/%m/%d %H:%M")
         except:
             continue
 
-        match = False
-        if period == "today" and dt.date() == now.date():
-            match = True
-        elif period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date():
-            match = True
-        elif period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]:
-            match = True
-        elif period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1]:
-            match = True
+        is_target = requester_id.lower() == user_id.lower()
 
-        if match:
-            schedules.append(f"**{dt.strftime('%Y/%m/%d')}**
-{content}")
+        if (
+            is_target and (
+                (period == "today" and dt.date() == now.date()) or
+                (period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date()) or
+                (period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]) or
+                (period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1])
+            )
+        ):
+            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
 
-    return "\n".join(schedules) if schedules else "目前沒有相關排程。"
+    return "\n\n".join(schedules) if schedules else "目前沒有相關排程。"
 
-def parse_schedule_input(text):
-    text = text.strip()
-    date_match = re.search(r"(\d{1,2})[\/](\d{1,2})", text)
-    time_match = re.search(r"(上午|下午)?\s?(\d{1,2})點(\d{1,2})?分?", text)
-    if not date_match or not time_match:
+def try_add_schedule(text, user_id):
+    try:
+        parts = text.strip().split()
+        if len(parts) >= 3:
+            date_part, time_part = parts[0], parts[1]
+            content = " ".join(parts[2:])
+
+            if date_part.count("/") == 1:
+                date_part = f"{datetime.now().year}/{date_part}"
+            dt = datetime.strptime(f"{date_part} {time_part}", "%Y/%m/%d %H:%M")
+
+            # 寫入 Google Sheet
+            sheet.append_row([
+                dt.strftime("%Y/%m/%d"),
+                dt.strftime("%H:%M"),
+                content,
+                user_id,
+                ""
+            ])
+
+            return (
+                f"✅ 行程已新增：\n"
+                f"- 日期：{dt.strftime('%Y/%m/%d')}\n"
+                f"- 時間：{dt.strftime('%H:%M')}\n"
+                f"- 內容：{content}\n"
+                f"（一小時前會提醒你）"
+            )
+    except Exception as e:
         return None
-
-    month = int(date_match.group(1))
-    day = int(date_match.group(2))
-    hour = int(time_match.group(2))
-    minute = int(time_match.group(3)) if time_match.group(3) else 0
-    if "下午" in time_match.group(1) and hour < 12:
-        hour += 12
-
-    year = datetime.now().year
-    event_time = datetime(year, month, day, hour, minute)
-    remind_time = (event_time - timedelta(hours=1)).strftime("%H:%M")
-    return {
-        "date": event_time.strftime("%Y/%m/%d"),
-        "remind_time": remind_time,
-        "content": re.sub(r".*點.*?分?\s*", "", text)
-    }
-
-def add_schedule_to_sheet(date, time, content, user_id):
-    sheet.append_row([date, time, content, user_id, ""])
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
