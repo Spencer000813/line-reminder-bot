@@ -1,8 +1,7 @@
 import os
 import json
-import threading
-import time
 from datetime import datetime, timedelta
+from threading import Timer
 from flask import Flask, request, abort
 
 import gspread
@@ -12,14 +11,14 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
-# LINE 機器人驗證資訊
+# LINE 驗證資訊
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Google Sheet 授權
+# Google Sheets 授權
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 credentials = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
@@ -43,7 +42,7 @@ def callback():
         abort(400)
     return "OK"
 
-# 關鍵字查詢條件（不分大小寫）
+# 指令關鍵字（轉為小寫比對）
 EXACT_MATCHES = {
     "今天有哪些行程": "today",
     "明天有哪些行程": "tomorrow",
@@ -53,7 +52,7 @@ EXACT_MATCHES = {
     "開始倒數": "countdown",
     "說哈囉": "coffee",
     "你好": "coffee",
-    "查詢id": "check_id"
+    "查詢id": "id"
 }
 
 @handler.add(MessageEvent, message=TextMessage)
@@ -62,37 +61,32 @@ def handle_message(event):
     reply_type = EXACT_MATCHES.get(user_text)
 
     if not reply_type:
-        return
+        return  # 指令不符，不回覆
 
     if reply_type == "coffee":
         reply = "要請我喝杯咖啡嗎?"
     elif reply_type == "countdown":
         reply = "倒數計時三分鐘開始..."
-        start_countdown(event.source)
-    elif reply_type == "check_id":
-        reply = get_source_id(event.source)
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        Timer(180, lambda: send_followup_message(event)).start()
+        return
+    elif reply_type == "id":
+        source = event.source
+        if source.type == "user":
+            reply = f"你的 User ID 是：\n{source.user_id}"
+        elif source.type == "group":
+            reply = f"這個群組的 Group ID 是：\n{source.group_id}"
+        else:
+            reply = "無法取得 ID。"
     else:
         reply = get_schedule(reply_type)
 
     if reply:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-def get_source_id(source):
-    if source.type == "user":
-        return f"你的用戶 ID 是：{source.user_id}"
-    elif source.type == "group":
-        return f"這個群組 ID 是：{source.group_id}"
-    else:
-        return "無法辨識來源。"
-
-def start_countdown(source):
-    def countdown():
-        time.sleep(180)
-        if source.type == "user":
-            line_bot_api.push_message(source.user_id, TextSendMessage(text="3分鐘已到"))
-        elif source.type == "group":
-            line_bot_api.push_message(source.group_id, TextSendMessage(text="3分鐘已到"))
-    threading.Thread(target=countdown).start()
+def send_followup_message(event):
+    target_id = event.source.user_id if event.source.type == "user" else event.source.group_id
+    line_bot_api.push_message(target_id, TextSendMessage(text="3分鐘已到"))
 
 def get_schedule(period):
     all_rows = sheet.get_all_values()[1:]
@@ -102,28 +96,34 @@ def get_schedule(period):
     for row in all_rows:
         if len(row) < 5:
             continue
+
         try:
             date_cell, time_str, content, user_id, status = row
+
+            # 日期處理
             if isinstance(date_cell, datetime):
                 date_str = date_cell.strftime("%Y/%m/%d")
             else:
                 date_str = str(date_cell).strip()
             time_str = str(time_str).strip()
+
             dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
-        except Exception as e:
-            print("❌ 跳過資料列：", row, "| 錯誤：", e)
+
+        except Exception:
             continue
 
-        if period == "today" and dt.date() == now.date():
-            schedules.append(f"{dt.strftime('%Y/%m/%d')} - {content}")
-        elif period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date():
-            schedules.append(f"{dt.strftime('%Y/%m/%d')} - {content}")
-        elif period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]:
-            schedules.append(f"{dt.strftime('%Y/%m/%d')} - {content}")
-        elif period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1]:
-            schedules.append(f"{dt.strftime('%Y/%m/%d')} - {content}")
+        # 比對時間條件
+        match = (
+            (period == "today" and dt.date() == now.date()) or
+            (period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date()) or
+            (period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]) or
+            (period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1])
+        )
 
-    return "\\n".join(schedules) if schedules else "目前沒有相關排程。"
+        if match:
+            schedules.append(f"**{dt.strftime('%Y/%m/%d')}**\n{content}")
+
+    return "\n\n".join(schedules) if schedules else "目前沒有相關排程。"
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
