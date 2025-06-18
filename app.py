@@ -6,6 +6,8 @@ from flask import Flask, request, abort
 import gspread
 from google.oauth2.service_account import Credentials
 
+from apscheduler.schedulers.background import BackgroundScheduler
+
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
@@ -24,7 +26,10 @@ gc = gspread.authorize(credentials)
 spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
 sheet = gc.open_by_key(spreadsheet_id).sheet1
 
+# Flask 應用與 APScheduler 初始化
 app = Flask(__name__)
+scheduler = BackgroundScheduler()
+scheduler.start()
 
 @app.route("/")
 def home():
@@ -40,7 +45,14 @@ def callback():
         abort(400)
     return "OK"
 
-# 關鍵字指令（不分大小寫比對）
+# 延遲三分鐘後的推播函數
+def send_countdown_reminder(user_id):
+    try:
+        line_bot_api.push_message(user_id, TextSendMessage(text="⏰ 3分鐘已到"))
+    except Exception as e:
+        print(f"推播失敗：{e}")
+
+# 指令對應表（不分大小寫）
 EXACT_MATCHES = {
     "今天有哪些行程": "today",
     "明天有哪些行程": "tomorrow",
@@ -57,7 +69,6 @@ def handle_message(event):
     user_text = event.message.text.strip()
     lower_text = user_text.lower()
 
-    # 只在用戶輸入「如何新增排程」時顯示說明
     if lower_text == "如何新增排程":
         reply = (
             "📌 新增排程請使用以下格式：\n"
@@ -73,10 +84,20 @@ def handle_message(event):
             reply = "要請我喝杯咖啡嗎?"
         elif reply_type == "countdown":
             reply = "倒數計時三分鐘開始...\n（3分鐘後我會提醒你：3分鐘已到）"
+            # 判斷是群組還是個人
+            target_id = getattr(event.source, 'group_id', None) or event.source.user_id
+            scheduler.add_job(
+                send_countdown_reminder,
+                trigger='date',
+                run_date=datetime.now() + timedelta(minutes=3),
+                args=[target_id]
+            )
         elif reply_type:
-            reply = get_schedule(reply_type, event.source.user_id)
+            requester_id = getattr(event.source, 'group_id', None) or event.source.user_id
+            reply = get_schedule(reply_type, requester_id)
         else:
-            reply = try_add_schedule(user_text, event.source.user_id)
+            requester_id = getattr(event.source, 'group_id', None) or event.source.user_id
+            reply = try_add_schedule(user_text, requester_id)
 
     if reply:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
@@ -137,8 +158,9 @@ def try_add_schedule(text, user_id):
                 f"- 內容：{content}\n"
                 f"（一小時前會提醒你）"
             )
-    except Exception:
-        return None  # 不回覆任何內容，交由 handle_message 最後處理
+    except Exception as e:
+        print(f"新增行程失敗：{e}")
+        return None
 
     return None
 
