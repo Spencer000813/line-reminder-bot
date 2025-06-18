@@ -57,7 +57,7 @@ def handle_message(event):
     user_text = event.message.text.strip()
     lower_text = user_text.lower()
 
-    # 若為「如何新增排程」問題，回覆教學格式
+    # 只在用戶輸入「如何新增排程」時顯示說明
     if lower_text == "如何新增排程":
         reply = (
             "📌 新增排程請使用以下格式：\n"
@@ -117,13 +117,11 @@ def try_add_schedule(text, user_id):
             date_part, time_part = parts[0], parts[1]
             content = " ".join(parts[2:])
 
-            # 若只有月/日，補上今年
             if date_part.count("/") == 1:
                 date_part = f"{datetime.now().year}/{date_part}"
 
             dt = datetime.strptime(f"{date_part} {time_part}", "%Y/%m/%d %H:%M")
 
-            # 寫入 Google Sheet
             sheet.append_row([
                 dt.strftime("%Y/%m/%d"),
                 dt.strftime("%H:%M"),
@@ -140,9 +138,9 @@ def try_add_schedule(text, user_id):
                 f"（一小時前會提醒你）"
             )
     except Exception:
-        pass
+        return None  # 不回覆任何內容，交由 handle_message 最後處理
 
-    return "❌ 格式填寫錯誤，請參考範例：\n7/1 14:00 帶小孩看醫生"
+    return None
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
