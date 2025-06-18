@@ -107,8 +107,10 @@ def try_add_schedule(text, user_id):
             date_part, time_part = parts[0], parts[1]
             content = " ".join(parts[2:])
 
+            # 若只有月/日，補上今年
             if date_part.count("/") == 1:
                 date_part = f"{datetime.now().year}/{date_part}"
+
             dt = datetime.strptime(f"{date_part} {time_part}", "%Y/%m/%d %H:%M")
 
             # 寫入 Google Sheet
@@ -127,8 +129,10 @@ def try_add_schedule(text, user_id):
                 f"- 內容：{content}\n"
                 f"（一小時前會提醒你）"
             )
-    except Exception as e:
-        return None
+    except Exception:
+        pass
+
+    return "❌ 格式填寫錯誤，請參考範例：\n7/1 14:00 帶小孩看醫生"
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
