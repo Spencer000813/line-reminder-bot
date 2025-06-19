@@ -58,8 +58,9 @@ EXACT_MATCHES = {
     "明日行程": "tomorrow",
     "本週行程": "this_week",
     "下週行程": "next_week",
-    "下個月行程": "next_month",    # ✅ 新增
-    "明年行程": "next_year",        # ✅ 新增
+    "本月行程": "this_month",     # ✅ 新增
+    "下個月行程": "next_month",
+    "明年行程": "next_year",
     "倒數計時": "countdown",
     "開始倒數": "countdown",
     "哈囉": "coffee",
@@ -128,6 +129,8 @@ def get_schedule(period, requester_id):
         elif period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]:
             schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
         elif period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1]:
+            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
+        elif period == "this_month" and dt.year == now.year and dt.month == now.month:
             schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
         elif period == "next_month":
             next_month = now.month + 1 if now.month < 12 else 1
