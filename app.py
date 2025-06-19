@@ -54,13 +54,13 @@ def send_countdown_reminder(user_id):
 
 # 指令對應表（不分大小寫）
 EXACT_MATCHES = {
-    "今天有哪些行程": "today",
-    "明天有哪些行程": "tomorrow",
-    "本週有哪些行程": "this_week",
-    "下週有哪些行程": "next_week",
+    "今日行程": "today",
+    "明日行程": "tomorrow",
+    "本週行程": "this_week",
+    "下週行程": "next_week",
     "倒數計時": "countdown",
     "開始倒數": "countdown",
-    "說哈囉": "coffee",
+    "哈囉": "coffee",
     "你好": "coffee"
 }
 
@@ -69,9 +69,9 @@ def handle_message(event):
     user_text = event.message.text.strip()
     lower_text = user_text.lower()
 
-    if lower_text == "如何新增排程":
+    if lower_text == "如何增加行程":
         reply = (
-            "📌 新增排程請使用以下格式：\n"
+            "📌 新增行程請使用以下格式：\n"
             "月/日 時:分 行程內容\n\n"
             "✅ 範例：\n"
             "7/1 14:00 餵小鳥\n"
