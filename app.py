@@ -1,3 +1,4 @@
+
 import os
 import json
 from datetime import datetime, timedelta
@@ -7,10 +8,16 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
+
+# 初始化 Flask 與 APScheduler
+app = Flask(__name__)
+scheduler = BackgroundScheduler()
+scheduler.start()
 
 # LINE 機器人驗證資訊
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -26,18 +33,13 @@ gc = gspread.authorize(credentials)
 spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
 sheet = gc.open_by_key(spreadsheet_id).sheet1
 
-# Flask 應用與 APScheduler 初始化
-app = Flask(__name__)
-scheduler = BackgroundScheduler()
-scheduler.start()
-
 @app.route("/")
 def home():
     return "LINE Reminder Bot is running."
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
@@ -45,20 +47,52 @@ def callback():
         abort(400)
     return "OK"
 
-# 延遲三分鐘後的推播函數
+# 延遲三分鐘後推播倒數訊息
 def send_countdown_reminder(user_id):
     try:
         line_bot_api.push_message(user_id, TextSendMessage(text="⏰ 3分鐘已到"))
     except Exception as e:
         print(f"推播失敗：{e}")
 
-# 指令對應表（不分大小寫）
+# 每週日晚間推播下週行程
+def weekly_summary():
+    all_rows = sheet.get_all_values()[1:]
+    now = datetime.now()
+    start = now + timedelta(days=(7 - now.weekday()))
+    end = start + timedelta(days=6)
+    start = start.replace(hour=0, minute=0)
+    end = end.replace(hour=23, minute=59)
+
+    user_schedules = {}
+
+    for row in all_rows:
+        if len(row) < 5:
+            continue
+        try:
+            date_str, time_str, content, user_id, _ = row
+            dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
+            if start <= dt <= end:
+                user_schedules.setdefault(user_id, []).append((dt, content))
+        except Exception:
+            continue
+
+    for user_id, items in user_schedules.items():
+        items.sort()
+        summary = "\n\n".join([f"*{dt.strftime('%Y/%m/%d')}*\n{content}" for dt, content in items])
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage(text=f"📅 下週行程摘要：\n\n{summary}"))
+        except Exception as e:
+            print(f"推播下週行程失敗：{e}")
+
+scheduler.add_job(weekly_summary, CronTrigger(day_of_week="sun", hour=23, minute=30))
+
+# 指令對應表
 EXACT_MATCHES = {
     "今日行程": "today",
     "明日行程": "tomorrow",
     "本週行程": "this_week",
     "下週行程": "next_week",
-    "本月行程": "this_month",     # ✅ 新增
+    "本月行程": "this_month",
     "下個月行程": "next_month",
     "明年行程": "next_year",
     "倒數計時": "countdown",
@@ -71,6 +105,7 @@ EXACT_MATCHES = {
 def handle_message(event):
     user_text = event.message.text.strip()
     lower_text = user_text.lower()
+    user_id = getattr(event.source, "group_id", None) or event.source.user_id
 
     if lower_text == "如何增加行程":
         reply = (
@@ -87,25 +122,21 @@ def handle_message(event):
             reply = "要請我喝杯咖啡嗎?"
         elif reply_type == "countdown":
             reply = "倒數計時三分鐘開始...\n（3分鐘後我會提醒你：3分鐘已到）"
-            # 判斷是群組還是個人
-            target_id = getattr(event.source, 'group_id', None) or event.source.user_id
             scheduler.add_job(
                 send_countdown_reminder,
-                trigger='date',
+                trigger="date",
                 run_date=datetime.now() + timedelta(minutes=3),
-                args=[target_id]
+                args=[user_id]
             )
         elif reply_type:
-            requester_id = getattr(event.source, 'group_id', None) or event.source.user_id
-            reply = get_schedule(reply_type, requester_id)
+            reply = get_schedule(reply_type, user_id)
         else:
-            requester_id = getattr(event.source, 'group_id', None) or event.source.user_id
-            reply = try_add_schedule(user_text, requester_id)
+            reply = try_add_schedule(user_text, user_id)
 
     if reply:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-def get_schedule(period, requester_id):
+def get_schedule(period, user_id):
     all_rows = sheet.get_all_values()[1:]
     now = datetime.now()
     schedules = []
@@ -114,30 +145,25 @@ def get_schedule(period, requester_id):
         if len(row) < 5:
             continue
         try:
-            date_cell, time_str, content, user_id, status = row
-            dt = datetime.strptime(f"{date_cell.strip()} {time_str.strip()}", "%Y/%m/%d %H:%M")
+            date_str, time_str, content, uid, _ = row
+            dt = datetime.strptime(f"{date_str.strip()} {time_str.strip()}", "%Y/%m/%d %H:%M")
         except:
             continue
 
-        if requester_id.lower() != user_id.lower():
+        if user_id.lower() != uid.lower():
             continue
 
-        if period == "today" and dt.date() == now.date():
-            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
-        elif period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date():
-            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
-        elif period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]:
-            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
-        elif period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1]:
-            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
-        elif period == "this_month" and dt.year == now.year and dt.month == now.month:
-            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
-        elif period == "next_month":
-            next_month = now.month + 1 if now.month < 12 else 1
-            next_year = now.year if now.month < 12 else now.year + 1
-            if dt.year == next_year and dt.month == next_month:
-                schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
-        elif period == "next_year" and dt.year == now.year + 1:
+        if (
+            (period == "today" and dt.date() == now.date()) or
+            (period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date()) or
+            (period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]) or
+            (period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1]) or
+            (period == "this_month" and dt.year == now.year and dt.month == now.month) or
+            (period == "next_month" and (
+                dt.year == now.year + 1 if now.month == 12 else now.year
+            ) and dt.month == (now.month % 12) + 1) or
+            (period == "next_year" and dt.year == now.year + 1)
+        ):
             schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
 
     return "\n\n".join(schedules) if schedules else "目前沒有相關排程。"
@@ -148,12 +174,9 @@ def try_add_schedule(text, user_id):
         if len(parts) >= 3:
             date_part, time_part = parts[0], parts[1]
             content = " ".join(parts[2:])
-
             if date_part.count("/") == 1:
                 date_part = f"{datetime.now().year}/{date_part}"
-
             dt = datetime.strptime(f"{date_part} {time_part}", "%Y/%m/%d %H:%M")
-
             sheet.append_row([
                 dt.strftime("%Y/%m/%d"),
                 dt.strftime("%H:%M"),
@@ -161,7 +184,6 @@ def try_add_schedule(text, user_id):
                 user_id,
                 ""
             ])
-
             return (
                 f"✅ 行程已新增：\n"
                 f"- 日期：{dt.strftime('%Y/%m/%d')}\n"
@@ -171,8 +193,6 @@ def try_add_schedule(text, user_id):
             )
     except Exception as e:
         print(f"新增行程失敗：{e}")
-        return None
-
     return None
 
 if __name__ == "__main__":
