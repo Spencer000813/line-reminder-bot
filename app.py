@@ -58,6 +58,8 @@ EXACT_MATCHES = {
     "明日行程": "tomorrow",
     "本週行程": "this_week",
     "下週行程": "next_week",
+    "下個月行程": "next_month",    # ✅ 新增
+    "明年行程": "next_year",        # ✅ 新增
     "倒數計時": "countdown",
     "開始倒數": "countdown",
     "哈囉": "coffee",
@@ -112,21 +114,27 @@ def get_schedule(period, requester_id):
             continue
         try:
             date_cell, time_str, content, user_id, status = row
-            date_str = date_cell if isinstance(date_cell, str) else date_cell.strftime("%Y/%m/%d")
-            dt = datetime.strptime(f"{date_str.strip()} {time_str.strip()}", "%Y/%m/%d %H:%M")
+            dt = datetime.strptime(f"{date_cell.strip()} {time_str.strip()}", "%Y/%m/%d %H:%M")
         except:
             continue
 
-        is_target = requester_id.lower() == user_id.lower()
+        if requester_id.lower() != user_id.lower():
+            continue
 
-        if (
-            is_target and (
-                (period == "today" and dt.date() == now.date()) or
-                (period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date()) or
-                (period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]) or
-                (period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1])
-            )
-        ):
+        if period == "today" and dt.date() == now.date():
+            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
+        elif period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date():
+            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
+        elif period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]:
+            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
+        elif period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1]:
+            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
+        elif period == "next_month":
+            next_month = now.month + 1 if now.month < 12 else 1
+            next_year = now.year if now.month < 12 else now.year + 1
+            if dt.year == next_year and dt.month == next_month:
+                schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
+        elif period == "next_year" and dt.year == now.year + 1:
             schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
 
     return "\n\n".join(schedules) if schedules else "目前沒有相關排程。"
