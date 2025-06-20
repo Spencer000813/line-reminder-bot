@@ -1,4 +1,3 @@
-
 import os
 import json
 from datetime import datetime, timedelta
@@ -97,8 +96,9 @@ EXACT_MATCHES = {
     "明年行程": "next_year",
     "倒數計時": "countdown",
     "開始倒數": "countdown",
-    "哈囉": "coffee",
-    "你好": "coffee"
+    "哈囉": "hello",
+    "hi": "hi",
+    "你還會說什麼?": "what_else"
 }
 
 @handler.add(MessageEvent, message=TextMessage)
@@ -118,8 +118,12 @@ def handle_message(event):
     else:
         reply_type = next((v for k, v in EXACT_MATCHES.items() if k.lower() == lower_text), None)
 
-        if reply_type == "coffee":
-            reply = "要請我喝杯咖啡嗎?"
+        if reply_type == "hello":
+            reply = "怎樣?"
+        elif reply_type == "hi":
+            reply = "呷飽沒?"
+        elif reply_type == "what_else":
+            reply = "我還會說我愛你"
         elif reply_type == "countdown":
             reply = "倒數計時三分鐘開始...\n（3分鐘後我會提醒你：3分鐘已到）"
             scheduler.add_job(
@@ -160,8 +164,8 @@ def get_schedule(period, user_id):
             (period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1]) or
             (period == "this_month" and dt.year == now.year and dt.month == now.month) or
             (period == "next_month" and (
-                dt.year == now.year + 1 if now.month == 12 else now.year
-            ) and dt.month == (now.month % 12) + 1) or
+                dt.year == (now.year + 1 if now.month == 12 else now.year)
+            ) and dt.month == ((now.month % 12) + 1)) or
             (period == "next_year" and dt.year == now.year + 1)
         ):
             schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
