@@ -32,6 +32,9 @@ gc = gspread.authorize(credentials)
 spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
 sheet = gc.open_by_key(spreadsheet_id).sheet1
 
+# 設定要發送早安訊息的群組 ID
+TARGET_GROUP_ID = os.getenv("MORNING_GROUP_ID", "YOUR_GROUP_ID_HERE")  # 可以從環境變數設定
+
 @app.route("/")
 def home():
     return "LINE Reminder Bot is running."
@@ -45,6 +48,18 @@ def callback():
     except InvalidSignatureError:
         abort(400)
     return "OK"
+
+# 每天早上7點發送早安訊息
+def send_morning_message():
+    try:
+        if TARGET_GROUP_ID != "YOUR_GROUP_ID_HERE":
+            message = "早安，又是新的一天 ☀️"
+            line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
+            print(f"早安訊息已發送到群組: {TARGET_GROUP_ID}")
+        else:
+            print("早安群組 ID 尚未設定")
+    except Exception as e:
+        print(f"發送早安訊息失敗：{e}")
 
 # 延遲三分鐘後推播倒數訊息
 def send_countdown_reminder(user_id):
@@ -83,7 +98,9 @@ def weekly_summary():
         except Exception as e:
             print(f"推播下週行程失敗：{e}")
 
+# 排程任務
 scheduler.add_job(weekly_summary, CronTrigger(day_of_week="sun", hour=23, minute=30))
+scheduler.add_job(send_morning_message, CronTrigger(hour=7, minute=0))  # 每天早上7點
 
 # 指令對應表
 EXACT_MATCHES = {
@@ -107,13 +124,34 @@ def handle_message(event):
     lower_text = user_text.lower()
     user_id = getattr(event.source, "group_id", None) or event.source.user_id
 
-    if lower_text == "如何增加行程":
+    # 新增早安相關指令
+    if lower_text == "設定早安群組":
+        group_id = getattr(event.source, "group_id", None)
+        if group_id:
+            global TARGET_GROUP_ID
+            TARGET_GROUP_ID = group_id
+            reply = f"✅ 已設定此群組為早安訊息群組\n群組 ID: {group_id}\n每天早上7點會自動發送早安訊息"
+        else:
+            reply = "❌ 此指令只能在群組中使用"
+    elif lower_text == "查看早安設定":
+        reply = f"目前早安群組 ID: {TARGET_GROUP_ID}\n{'✅ 已設定' if TARGET_GROUP_ID != 'YOUR_GROUP_ID_HERE' else '❌ 尚未設定'}"
+    elif lower_text == "測試早安":
+        group_id = getattr(event.source, "group_id", None)
+        if group_id == TARGET_GROUP_ID or TARGET_GROUP_ID == "C4e138aa0eb252daa89846daab0102e41":
+            reply = "早安，又是新的一天 ☀️"
+        else:
+            reply = "此群組未設定為早安群組"
+    elif lower_text == "如何增加行程":
         reply = (
             "📌 新增行程請使用以下格式：\n"
             "月/日 時:分 行程內容\n\n"
             "✅ 範例：\n"
             "7/1 14:00 餵小鳥\n"
-            "（也可寫成 2025/7/1 14:00 客戶拜訪）"
+            "（也可寫成 2025/7/1 14:00 客戶拜訪）\n\n"
+            "🌅 早安訊息指令：\n"
+            "• 設定早安群組 - 設定此群組為早安訊息群組\n"
+            "• 查看早安設定 - 查看目前設定\n"
+            "• 測試早安 - 測試早安訊息"
         )
     else:
         reply_type = next((v for k, v in EXACT_MATCHES.items() if k.lower() == lower_text), None)
@@ -123,7 +161,7 @@ def handle_message(event):
         elif reply_type == "hi":
             reply = "呷飽沒?"
         elif reply_type == "what_else":
-            reply = "我還會說我愛你"
+            reply = "我愛你❤️"
         elif reply_type == "countdown":
             reply = "倒數計時三分鐘開始...\n（3分鐘後我會提醒你：3分鐘已到）"
             scheduler.add_job(
@@ -200,5 +238,10 @@ def try_add_schedule(text, user_id):
     return None
 
 if __name__ == "__main__":
+    print("LINE Bot 啟動中...")
+    print("排程任務:")
+    print("- 每天早上 7:00 發送早安訊息")
+    print("- 每週日晚上 23:30 發送下週行程摘要")
+    
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
