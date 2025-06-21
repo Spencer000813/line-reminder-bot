@@ -33,7 +33,7 @@ spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
 sheet = gc.open_by_key(spreadsheet_id).sheet1
 
 # 設定要發送早安訊息的群組 ID
-TARGET_GROUP_ID = os.getenv("MORNING_GROUP_ID", "YOUR_GROUP_ID_HERE")  # 可以從環境變數設定
+TARGET_GROUP_ID = os.getenv("MORNING_GROUP_ID", "C4e138aa0eb252daa89846daab0102e41")  # 可以從環境變數設定
 
 @app.route("/")
 def home():
@@ -52,7 +52,7 @@ def callback():
 # 每天早上7點發送早安訊息
 def send_morning_message():
     try:
-        if TARGET_GROUP_ID != "YOUR_GROUP_ID_HERE":
+        if TARGET_GROUP_ID != "C4e138aa0eb252daa89846daab0102e41":
             message = "早安，又是新的一天 ☀️"
             line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
             print(f"早安訊息已發送到群組: {TARGET_GROUP_ID}")
