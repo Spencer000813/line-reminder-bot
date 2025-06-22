@@ -65,42 +65,78 @@ def send_morning_message():
 def send_countdown_reminder(user_id):
     try:
         line_bot_api.push_message(user_id, TextSendMessage(text="⏰ 3分鐘已到"))
+        print(f"倒數提醒已發送給：{user_id}")
     except Exception as e:
-        print(f"推播失敗：{e}")
+        print(f"推播倒數提醒失敗：{e}")
 
-# 每週日晚間推播下週行程
+# 修正後的每週日晚間推播下週行程
 def weekly_summary():
-    all_rows = sheet.get_all_values()[1:]
-    now = datetime.now()
-    start = now + timedelta(days=(7 - now.weekday()))
-    end = start + timedelta(days=6)
-    start = start.replace(hour=0, minute=0)
-    end = end.replace(hour=23, minute=59)
+    print("開始執行每週行程摘要...")
+    try:
+        all_rows = sheet.get_all_values()[1:]
+        now = datetime.now()
+        
+        # 修正：計算下週一到下週日的範圍
+        # 如果今天是週日(6)，下週一就是明天(+1天)
+        # 如果今天是週一(0)，下週一就是7天後
+        days_until_next_monday = (7 - now.weekday()) % 7
+        if days_until_next_monday == 0:  # 如果今天是週一
+            days_until_next_monday = 7   # 取下週一
+            
+        start = now + timedelta(days=days_until_next_monday)
+        end = start + timedelta(days=6)
+        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
+        
+        print(f"查詢時間範圍：{start.strftime('%Y/%m/%d %H:%M')} 到 {end.strftime('%Y/%m/%d %H:%M')}")
+        
+        user_schedules = {}
 
-    user_schedules = {}
+        for row in all_rows:
+            if len(row) < 5:
+                continue
+            try:
+                date_str, time_str, content, user_id, _ = row
+                dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
+                if start <= dt <= end:
+                    user_schedules.setdefault(user_id, []).append((dt, content))
+            except Exception as e:
+                print(f"處理行程資料失敗：{e}")
+                continue
 
-    for row in all_rows:
-        if len(row) < 5:
-            continue
-        try:
-            date_str, time_str, content, user_id, _ = row
-            dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
-            if start <= dt <= end:
-                user_schedules.setdefault(user_id, []).append((dt, content))
-        except Exception:
-            continue
+        print(f"找到 {len(user_schedules)} 位使用者有下週行程")
+        
+        # 發送給每個有行程的使用者
+        for user_id, items in user_schedules.items():
+            items.sort()
+            summary = "\n\n".join([f"*{dt.strftime('%Y/%m/%d %H:%M')}*\n{content}" for dt, content in items])
+            try:
+                line_bot_api.push_message(user_id, TextSendMessage(text=f"📅 下週行程摘要：\n\n{summary}"))
+                print(f"已發送下週行程摘要給使用者：{user_id}")
+            except Exception as e:
+                print(f"推播下週行程失敗給 {user_id}：{e}")
+                
+        print("每週行程摘要執行完成")
+                
+    except Exception as e:
+        print(f"每週行程摘要執行失敗：{e}")
 
-    for user_id, items in user_schedules.items():
-        items.sort()
-        summary = "\n\n".join([f"*{dt.strftime('%Y/%m/%d')}*\n{content}" for dt, content in items])
-        try:
-            line_bot_api.push_message(user_id, TextSendMessage(text=f"📅 下週行程摘要：\n\n{summary}"))
-        except Exception as e:
-            print(f"推播下週行程失敗：{e}")
+# 手動觸發週報（用於測試）
+def manual_weekly_summary():
+    print("手動執行每週行程摘要...")
+    weekly_summary()
 
 # 排程任務
-scheduler.add_job(weekly_summary, CronTrigger(day_of_week="sun", hour=23, minute=10))
-scheduler.add_job(send_morning_message, CronTrigger(hour=7, minute=0))  # 每天早上7點
+scheduler.add_job(
+    weekly_summary, 
+    CronTrigger(day_of_week="sun", hour=23, minute=30),  # 週日晚上 23:30
+    id="weekly_summary"
+)
+scheduler.add_job(
+    send_morning_message, 
+    CronTrigger(hour=7, minute=0),  # 每天早上7點
+    id="morning_message"
+)
 
 # 指令對應表
 EXACT_MATCHES = {
@@ -134,13 +170,32 @@ def handle_message(event):
         else:
             reply = "❌ 此指令只能在群組中使用"
     elif lower_text == "查看早安設定":
-        reply = f"目前早安群組 ID: {TARGET_GROUP_ID}\n{'✅ 已設定' if TARGET_GROUP_ID != 'YOUR_GROUP_ID_HERE' else '❌ 尚未設定'}"
+        reply = f"目前早安群組 ID: {TARGET_GROUP_ID}\n{'✅ 已設定' if TARGET_GROUP_ID != 'C4e138aa0eb252daa89846daab0102e41' else '❌ 尚未設定'}"
     elif lower_text == "測試早安":
         group_id = getattr(event.source, "group_id", None)
         if group_id == TARGET_GROUP_ID or TARGET_GROUP_ID == "C4e138aa0eb252daa89846daab0102e41":
             reply = "早安，又是新的一天 ☀️"
         else:
             reply = "此群組未設定為早安群組"
+    elif lower_text == "測試週報":
+        try:
+            manual_weekly_summary()
+            reply = "✅ 週報已手動執行，請檢查 log 確認執行狀況"
+        except Exception as e:
+            reply = f"❌ 週報執行失敗：{str(e)}"
+    elif lower_text == "查看排程":
+        try:
+            jobs = scheduler.get_jobs()
+            if jobs:
+                job_info = []
+                for job in jobs:
+                    next_run = job.next_run_time.strftime('%Y/%m/%d %H:%M:%S') if job.next_run_time else "未設定"
+                    job_info.append(f"• {job.id}: {next_run}")
+                reply = f"📋 目前排程工作：\n" + "\n".join(job_info)
+            else:
+                reply = "❌ 沒有找到任何排程工作"
+        except Exception as e:
+            reply = f"❌ 查看排程失敗：{str(e)}"
     elif lower_text == "如何增加行程":
         reply = (
             "📌 新增行程請使用以下格式：\n"
@@ -151,7 +206,10 @@ def handle_message(event):
             "🌅 早安訊息指令：\n"
             "• 設定早安群組 - 設定此群組為早安訊息群組\n"
             "• 查看早安設定 - 查看目前設定\n"
-            "• 測試早安 - 測試早安訊息"
+            "• 測試早安 - 測試早安訊息\n\n"
+            "🔧 測試指令：\n"
+            "• 測試週報 - 手動執行週報推播\n"
+            "• 查看排程 - 查看目前排程狀態"
         )
     else:
         reply_type = next((v for k, v in EXACT_MATCHES.items() if k.lower() == lower_text), None)
@@ -168,7 +226,8 @@ def handle_message(event):
                 send_countdown_reminder,
                 trigger="date",
                 run_date=datetime.now() + timedelta(minutes=3),
-                args=[user_id]
+                args=[user_id],
+                id=f"countdown_{user_id}_{datetime.now().timestamp()}"
             )
         elif reply_type:
             reply = get_schedule(reply_type, user_id)
@@ -179,36 +238,41 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 def get_schedule(period, user_id):
-    all_rows = sheet.get_all_values()[1:]
-    now = datetime.now()
-    schedules = []
+    try:
+        all_rows = sheet.get_all_values()[1:]
+        now = datetime.now()
+        schedules = []
 
-    for row in all_rows:
-        if len(row) < 5:
-            continue
-        try:
-            date_str, time_str, content, uid, _ = row
-            dt = datetime.strptime(f"{date_str.strip()} {time_str.strip()}", "%Y/%m/%d %H:%M")
-        except:
-            continue
+        for row in all_rows:
+            if len(row) < 5:
+                continue
+            try:
+                date_str, time_str, content, uid, _ = row
+                dt = datetime.strptime(f"{date_str.strip()} {time_str.strip()}", "%Y/%m/%d %H:%M")
+            except Exception as e:
+                print(f"解析時間失敗：{e}")
+                continue
 
-        if user_id.lower() != uid.lower():
-            continue
+            if user_id.lower() != uid.lower():
+                continue
 
-        if (
-            (period == "today" and dt.date() == now.date()) or
-            (period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date()) or
-            (period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1]) or
-            (period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1]) or
-            (period == "this_month" and dt.year == now.year and dt.month == now.month) or
-            (period == "next_month" and (
-                dt.year == (now.year + 1 if now.month == 12 else now.year)
-            ) and dt.month == ((now.month % 12) + 1)) or
-            (period == "next_year" and dt.year == now.year + 1)
-        ):
-            schedules.append(f"*{dt.strftime('%Y/%m/%d')}*\n{content}")
+            if (
+                (period == "today" and dt.date() == now.date()) or
+                (period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date()) or
+                (period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1] and dt.year == now.year) or
+                (period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1] and dt.year == (now + timedelta(days=7)).year) or
+                (period == "this_month" and dt.year == now.year and dt.month == now.month) or
+                (period == "next_month" and (
+                    dt.year == (now.year + 1 if now.month == 12 else now.year)
+                ) and dt.month == ((now.month % 12) + 1)) or
+                (period == "next_year" and dt.year == now.year + 1)
+            ):
+                schedules.append(f"*{dt.strftime('%Y/%m/%d %H:%M')}*\n{content}")
 
-    return "\n\n".join(schedules) if schedules else "目前沒有相關排程。"
+        return "\n\n".join(schedules) if schedules else "目前沒有相關排程。"
+    except Exception as e:
+        print(f"取得行程失敗：{e}")
+        return "取得行程時發生錯誤，請稍後再試。"
 
 def try_add_schedule(text, user_id):
     try:
@@ -216,9 +280,17 @@ def try_add_schedule(text, user_id):
         if len(parts) >= 3:
             date_part, time_part = parts[0], parts[1]
             content = " ".join(parts[2:])
+            
+            # 如果日期格式是 M/D，自動加上當前年份
             if date_part.count("/") == 1:
                 date_part = f"{datetime.now().year}/{date_part}"
+            
             dt = datetime.strptime(f"{date_part} {time_part}", "%Y/%m/%d %H:%M")
+            
+            # 檢查日期是否為過去時間
+            if dt < datetime.now():
+                return "❌ 不能新增過去的時間，請確認日期和時間是否正確。"
+            
             sheet.append_row([
                 dt.strftime("%Y/%m/%d"),
                 dt.strftime("%H:%M"),
@@ -233,8 +305,13 @@ def try_add_schedule(text, user_id):
                 f"- 內容：{content}\n"
                 f"（一小時前會提醒你）"
             )
+    except ValueError as e:
+        print(f"時間格式錯誤：{e}")
+        return "❌ 時間格式錯誤，請使用：月/日 時:分 行程內容\n範例：7/1 14:00 開會"
     except Exception as e:
         print(f"新增行程失敗：{e}")
+        return "❌ 新增行程失敗，請稍後再試或聯絡管理員。"
+    
     return None
 
 if __name__ == "__main__":
@@ -242,6 +319,16 @@ if __name__ == "__main__":
     print("排程任務:")
     print("- 每天早上 7:00 發送早安訊息")
     print("- 每週日晚上 23:30 發送下週行程摘要")
+    
+    # 顯示目前排程狀態
+    try:
+        jobs = scheduler.get_jobs()
+        print(f"已載入 {len(jobs)} 個排程工作")
+        for job in jobs:
+            next_run = job.next_run_time.strftime('%Y/%m/%d %H:%M:%S') if job.next_run_time else "未設定"
+            print(f"  - {job.id}: 下次執行時間 {next_run}")
+    except Exception as e:
+        print(f"查看排程狀態失敗：{e}")
     
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
