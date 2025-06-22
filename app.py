@@ -33,7 +33,7 @@ spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
 sheet = gc.open_by_key(spreadsheet_id).sheet1
 
 # 設定要發送早安訊息和週報的群組 ID
-TARGET_GROUP_ID = os.getenv("MORNING_GROUP_ID", "你的群組ID")  # 將「你的群組ID」替換成實際的群組ID
+TARGET_GROUP_ID = os.getenv("MORNING_GROUP_ID", "C4e138aa0eb252daa89846daab0102e41")  # 將「你的群組ID」替換成實際的群組ID
 
 @app.route("/")
 def home():
@@ -52,7 +52,7 @@ def callback():
 # 每天早上7點發送早安訊息
 def send_morning_message():
     try:
-        if TARGET_GROUP_ID != "你的群組ID":
+        if TARGET_GROUP_ID != "C4e138aa0eb252daa89846daab0102e41":
             message = "早安，又是新的一天 ☀️"
             line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
             print(f"早安訊息已發送到群組: {TARGET_GROUP_ID}")
@@ -74,7 +74,7 @@ def weekly_summary():
     print("開始執行每週行程摘要...")
     try:
         # 檢查是否已設定群組 ID
-        if TARGET_GROUP_ID == "你的群組ID":
+        if TARGET_GROUP_ID == "C4e138aa0eb252daa89846daab0102e41":
             print("週報群組 ID 尚未設定，跳過週報推播")
             return
             
@@ -196,10 +196,10 @@ def handle_message(event):
         else:
             reply = "❌ 此指令只能在群組中使用"
     elif lower_text == "查看群組設定":
-        reply = f"目前群組 ID: {TARGET_GROUP_ID}\n{'✅ 已設定' if TARGET_GROUP_ID != '你的群組ID' else '❌ 尚未設定'}\n\n功能說明：\n• 早安訊息：每天7點推播\n• 週報摘要：每週日晚上推播下週行程"
+        reply = f"目前群組 ID: {TARGET_GROUP_ID}\n{'✅ 已設定' if TARGET_GROUP_ID != 'C4e138aa0eb252daa89846daab0102e41' else '❌ 尚未設定'}\n\n功能說明：\n• 早安訊息：每天7點推播\n• 週報摘要：每週日晚上推播下週行程"
     elif lower_text == "測試早安":
         group_id = getattr(event.source, "group_id", None)
-        if group_id == TARGET_GROUP_ID or TARGET_GROUP_ID == "你的群組ID":
+        if group_id == TARGET_GROUP_ID or TARGET_GROUP_ID == "C4e138aa0eb252daa89846daab0102e41":
             reply = "早安，又是新的一天 ☀️"
         else:
             reply = "此群組未設定為推播群組"
