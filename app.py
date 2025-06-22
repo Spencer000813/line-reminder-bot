@@ -99,7 +99,7 @@ def weekly_summary():
             print(f"推播下週行程失敗：{e}")
 
 # 排程任務
-scheduler.add_job(weekly_summary, CronTrigger(day_of_week="sun", hour=23, minute=00))
+scheduler.add_job(weekly_summary, CronTrigger(day_of_week="sun", hour=23, minute=10))
 scheduler.add_job(send_morning_message, CronTrigger(hour=7, minute=0))  # 每天早上7點
 
 # 指令對應表
