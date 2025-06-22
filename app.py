@@ -32,8 +32,8 @@ gc = gspread.authorize(credentials)
 spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
 sheet = gc.open_by_key(spreadsheet_id).sheet1
 
-# 設定要發送早安訊息的群組 ID
-TARGET_GROUP_ID = os.getenv("MORNING_GROUP_ID", "C4e138aa0eb252daa89846daab0102e41")  # 可以從環境變數設定
+# 設定要發送早安訊息和週報的群組 ID
+TARGET_GROUP_ID = os.getenv("MORNING_GROUP_ID", "你的群組ID")  # 將「你的群組ID」替換成實際的群組ID
 
 @app.route("/")
 def home():
@@ -52,12 +52,12 @@ def callback():
 # 每天早上7點發送早安訊息
 def send_morning_message():
     try:
-        if TARGET_GROUP_ID != "C4e138aa0eb252daa89846daab0102e41":
+        if TARGET_GROUP_ID != "你的群組ID":
             message = "早安，又是新的一天 ☀️"
             line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
             print(f"早安訊息已發送到群組: {TARGET_GROUP_ID}")
         else:
-            print("早安群組 ID 尚未設定")
+            print("推播群組 ID 尚未設定")
     except Exception as e:
         print(f"發送早安訊息失敗：{e}")
 
@@ -69,10 +69,15 @@ def send_countdown_reminder(user_id):
     except Exception as e:
         print(f"推播倒數提醒失敗：{e}")
 
-# 修正後的每週日晚間推播下週行程
+# 修正後的每週日晚間推播下週行程（只發送到指定群組）
 def weekly_summary():
     print("開始執行每週行程摘要...")
     try:
+        # 檢查是否已設定群組 ID
+        if TARGET_GROUP_ID == "你的群組ID":
+            print("週報群組 ID 尚未設定，跳過週報推播")
+            return
+            
         all_rows = sheet.get_all_values()[1:]
         now = datetime.now()
         
@@ -106,15 +111,36 @@ def weekly_summary():
 
         print(f"找到 {len(user_schedules)} 位使用者有下週行程")
         
-        # 發送給每個有行程的使用者
-        for user_id, items in user_schedules.items():
-            items.sort()
-            summary = "\n\n".join([f"*{dt.strftime('%Y/%m/%d %H:%M')}*\n{content}" for dt, content in items])
-            try:
-                line_bot_api.push_message(user_id, TextSendMessage(text=f"📅 下週行程摘要：\n\n{summary}"))
-                print(f"已發送下週行程摘要給使用者：{user_id}")
-            except Exception as e:
-                print(f"推播下週行程失敗給 {user_id}：{e}")
+        if not user_schedules:
+            # 如果沒有行程，也發送提醒
+            message = f"📅 下週行程摘要 ({start.strftime('%m/%d')} - {end.strftime('%m/%d')})：\n\n🎉 下週沒有安排任何行程，好好放鬆吧！"
+        else:
+            # 整理所有使用者的行程到一個訊息中
+            message = f"📅 下週行程摘要 ({start.strftime('%m/%d')} - {end.strftime('%m/%d')})：\n\n"
+            
+            # 按日期排序所有行程
+            all_schedules = []
+            for user_id, items in user_schedules.items():
+                for dt, content in items:
+                    all_schedules.append((dt, content, user_id))
+            
+            all_schedules.sort()  # 按時間排序
+            
+            current_date = None
+            for dt, content, user_id in all_schedules:
+                # 如果是新的日期，加上日期標題
+                if current_date != dt.date():
+                    current_date = dt.date()
+                    message += f"\n📆 *{dt.strftime('%m/%d (%a)')}*\n"
+                
+                # 顯示時間和內容（可選擇是否顯示使用者 ID）
+                message += f"• {dt.strftime('%H:%M')} {content}\n"
+        
+        try:
+            line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
+            print(f"已發送週報摘要到群組：{TARGET_GROUP_ID}")
+        except Exception as e:
+            print(f"推播週報到群組失敗：{e}")
                 
         print("每週行程摘要執行完成")
                 
@@ -129,12 +155,12 @@ def manual_weekly_summary():
 # 排程任務
 scheduler.add_job(
     weekly_summary, 
-    CronTrigger(day_of_week="sun", hour=23, minute=30),  # 週日晚上 23:30
+    CronTrigger(day_of_week="sun", hour=22, minute=0),   # 週日晚上 22:00 (可自行調整)
     id="weekly_summary"
 )
 scheduler.add_job(
     send_morning_message, 
-    CronTrigger(hour=7, minute=0),  # 每天早上7點
+    CronTrigger(hour=8, minute=30),  # 每天早上8:30 (可自行調整)
     id="morning_message"
 )
 
@@ -169,21 +195,27 @@ def handle_message(event):
             reply = f"✅ 已設定此群組為早安訊息群組\n群組 ID: {group_id}\n每天早上7點會自動發送早安訊息"
         else:
             reply = "❌ 此指令只能在群組中使用"
-    elif lower_text == "查看早安設定":
-        reply = f"目前早安群組 ID: {TARGET_GROUP_ID}\n{'✅ 已設定' if TARGET_GROUP_ID != 'C4e138aa0eb252daa89846daab0102e41' else '❌ 尚未設定'}"
+    elif lower_text == "查看群組設定":
+        reply = f"目前群組 ID: {TARGET_GROUP_ID}\n{'✅ 已設定' if TARGET_GROUP_ID != '你的群組ID' else '❌ 尚未設定'}\n\n功能說明：\n• 早安訊息：每天7點推播\n• 週報摘要：每週日晚上推播下週行程"
     elif lower_text == "測試早安":
         group_id = getattr(event.source, "group_id", None)
-        if group_id == TARGET_GROUP_ID or TARGET_GROUP_ID == "C4e138aa0eb252daa89846daab0102e41":
+        if group_id == TARGET_GROUP_ID or TARGET_GROUP_ID == "你的群組ID":
             reply = "早安，又是新的一天 ☀️"
         else:
-            reply = "此群組未設定為早安群組"
+            reply = "此群組未設定為推播群組"
     elif lower_text == "測試週報":
         try:
             manual_weekly_summary()
             reply = "✅ 週報已手動執行，請檢查 log 確認執行狀況"
         except Exception as e:
             reply = f"❌ 週報執行失敗：{str(e)}"
-    elif lower_text == "查看排程":
+    elif lower_text == "查看id":
+        group_id = getattr(event.source, "group_id", None)
+        user_id = event.source.user_id
+        if group_id:
+            reply = f"📋 目前資訊：\n群組 ID: {group_id}\n使用者 ID: {user_id}"
+        else:
+            reply = f"📋 目前資訊：\n使用者 ID: {user_id}\n（這是個人對話，沒有群組 ID）"
         try:
             jobs = scheduler.get_jobs()
             if jobs:
@@ -203,13 +235,14 @@ def handle_message(event):
             "✅ 範例：\n"
             "7/1 14:00 餵小鳥\n"
             "（也可寫成 2025/7/1 14:00 客戶拜訪）\n\n"
-            "🌅 早安訊息指令：\n"
-            "• 設定早安群組 - 設定此群組為早安訊息群組\n"
-            "• 查看早安設定 - 查看目前設定\n"
+            "🌅 群組推播設定：\n"
+            "• 設定週報群組 - 設定此群組為推播群組\n"
+            "• 查看群組設定 - 查看目前設定\n"
             "• 測試早安 - 測試早安訊息\n\n"
             "🔧 測試指令：\n"
             "• 測試週報 - 手動執行週報推播\n"
-            "• 查看排程 - 查看目前排程狀態"
+            "• 查看排程 - 查看目前排程狀態\n"
+            "• 查看id - 查看目前群組/使用者 ID"
         )
     else:
         reply_type = next((v for k, v in EXACT_MATCHES.items() if k.lower() == lower_text), None)
@@ -317,8 +350,8 @@ def try_add_schedule(text, user_id):
 if __name__ == "__main__":
     print("LINE Bot 啟動中...")
     print("排程任務:")
-    print("- 每天早上 7:00 發送早安訊息")
-    print("- 每週日晚上 23:30 發送下週行程摘要")
+    print("- 每天早上 8:30 發送早安訊息")
+    print("- 每週日晚上 22:00 發送下週行程摘要")
     
     # 顯示目前排程狀態
     try:
