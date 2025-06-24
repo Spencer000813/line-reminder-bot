@@ -180,6 +180,49 @@ EXACT_MATCHES = {
     "你還會說什麼?": "what_else"
 }
 
+# 檢查文字是否為行程格式
+def is_schedule_format(text):
+    """檢查文字是否像是行程格式"""
+    parts = text.strip().split()
+    if len(parts) < 3:
+        return False
+    
+    # 檢查前兩個部分是否像日期時間格式
+    try:
+        date_part, time_part = parts[0], parts[1]
+        
+        # 檢查日期格式 (M/D 或 YYYY/M/D)
+        if "/" in date_part:
+            date_segments = date_part.split("/")
+            if len(date_segments) == 2 or len(date_segments) == 3:
+                # 檢查是否都是數字
+                if all(segment.isdigit() for segment in date_segments):
+                    # 檢查時間格式 (HH:MM)
+                    if ":" in time_part:
+                        time_segments = time_part.split(":")
+                        if len(time_segments) == 2:
+                            if all(segment.isdigit() for segment in time_segments):
+                                return True
+    except:
+        pass
+    
+    return False
+
+# 產生通用回應
+def generate_general_response(text):
+    """為一般對話產生回應"""
+    text_lower = text.lower()
+    
+    # 一些簡單的關鍵字回應
+    if any(keyword in text_lower for keyword in ["謝謝", "感謝", "thank"]):
+        return "不客氣！有什麼需要幫忙的嗎？"
+    elif any(keyword in text_lower for keyword in ["你好", "hello", "嗨"]):
+        return "你好！我是行程管理機器人，可以幫你管理行程喔！"
+    elif any(keyword in text_lower for keyword in ["幫助", "help", "說明"]):
+        return "輸入「如何增加行程」可以查看使用說明！"
+    else:
+        return "我不太懂你的意思。你可以輸入「如何增加行程」查看使用說明，或是直接用「月/日 時:分 行程內容」的格式來新增行程！"
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text.strip()
@@ -216,6 +259,7 @@ def handle_message(event):
             reply = f"📋 目前資訊：\n群組 ID: {group_id}\n使用者 ID: {user_id}"
         else:
             reply = f"📋 目前資訊：\n使用者 ID: {user_id}\n（這是個人對話，沒有群組 ID）"
+    elif lower_text == "查看排程":
         try:
             jobs = scheduler.get_jobs()
             if jobs:
@@ -236,7 +280,7 @@ def handle_message(event):
             "7/1 14:00 餵小鳥\n"
             "（也可寫成 2025/7/1 14:00 客戶拜訪）\n\n"
             "🌅 群組推播設定：\n"
-            "• 設定週報群組 - 設定此群組為推播群組\n"
+            "• 設定早安群組 - 設定此群組為推播群組\n"
             "• 查看群組設定 - 查看目前設定\n"
             "• 測試早安 - 測試早安訊息\n\n"
             "🔧 測試指令：\n"
@@ -265,7 +309,12 @@ def handle_message(event):
         elif reply_type:
             reply = get_schedule(reply_type, user_id)
         else:
-            reply = try_add_schedule(user_text, user_id)
+            # 檢查是否為行程格式
+            if is_schedule_format(user_text):
+                reply = try_add_schedule(user_text, user_id)
+            else:
+                # 處理一般對話
+                reply = generate_general_response(user_text)
 
     if reply:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
