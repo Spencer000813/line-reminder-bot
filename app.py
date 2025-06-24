@@ -184,7 +184,7 @@ EXACT_MATCHES = {
 def is_schedule_format(text):
     """檢查文字是否像是行程格式"""
     parts = text.strip().split()
-    if len(parts) < 3:
+    if len(parts) < 2:
         return False
     
     # 檢查前兩個部分是否像日期時間格式
@@ -197,12 +197,18 @@ def is_schedule_format(text):
             if len(date_segments) == 2 or len(date_segments) == 3:
                 # 檢查是否都是數字
                 if all(segment.isdigit() for segment in date_segments):
-                    # 檢查時間格式 (HH:MM)
+                    # 檢查時間格式 (HH:MM)，但允許沒有空格的情況
                     if ":" in time_part:
-                        time_segments = time_part.split(":")
-                        if len(time_segments) == 2:
-                            if all(segment.isdigit() for segment in time_segments):
-                                return True
+                        # 找到冒號的位置，提取時間部分
+                        colon_index = time_part.find(":")
+                        if colon_index > 0:
+                            # 提取時間部分（HH:MM）
+                            time_only = time_part[:colon_index+3]  # 包含HH:MM
+                            if len(time_only) >= 4:  # 至少要有H:MM或HH:M
+                                time_segments = time_only.split(":")
+                                if len(time_segments) == 2:
+                                    if all(segment.isdigit() for segment in time_segments):
+                                        return True
     except:
         pass
     
@@ -359,9 +365,43 @@ def get_schedule(period, user_id):
 def try_add_schedule(text, user_id):
     try:
         parts = text.strip().split()
-        if len(parts) >= 3:
-            date_part, time_part = parts[0], parts[1]
-            content = " ".join(parts[2:])
+        if len(parts) >= 2:
+            date_part = parts[0]
+            time_and_content = " ".join(parts[1:])
+            
+            # 處理時間和內容可能沒有空格分隔的情況
+            # 例如: "7/1 14:00餵小鳥" 或 "7/1 14:00 餵小鳥"
+            time_part = None
+            content = None
+            
+            # 尋找時間格式 HH:MM
+            if ":" in time_and_content:
+                colon_index = time_and_content.find(":")
+                # 假設時間格式是 HH:MM，所以從冒號往前1-2位和往後2位
+                if colon_index >= 1:
+                    # 找到時間的開始位置
+                    time_start = max(0, colon_index - 2)
+                    while time_start < colon_index and not time_and_content[time_start].isdigit():
+                        time_start += 1
+                    
+                    # 找到時間的結束位置（冒號後2位數字）
+                    time_end = colon_index + 3
+                    if time_end <= len(time_and_content):
+                        potential_time = time_and_content[time_start:time_end]
+                        # 驗證時間格式
+                        if ":" in potential_time:
+                            time_segments = potential_time.split(":")
+                            if len(time_segments) == 2 and all(seg.isdigit() for seg in time_segments):
+                                time_part = potential_time
+                                content = time_and_content[time_end:].strip()
+                                
+                                # 如果沒有內容，可能是因為時間和內容之間沒有空格
+                                if not content:
+                                    content = time_and_content[time_end:].strip()
+            
+            # 如果無法解析時間，返回格式錯誤
+            if not time_part or not content:
+                return "❌ 時間格式錯誤，請使用：月/日 時:分 行程內容\n範例：7/1 14:00 開會"
             
             # 如果日期格式是 M/D，自動加上當前年份
             if date_part.count("/") == 1:
