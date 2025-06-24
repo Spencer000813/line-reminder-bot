@@ -62,12 +62,12 @@ def send_morning_message():
         print(f"發送早安訊息失敗：{e}")
 
 # 延遲三分鐘後推播倒數訊息
-def send_countdown_reminder(user_id):
+def send_countdown_reminder(user_id, minutes):
     try:
-        line_bot_api.push_message(user_id, TextSendMessage(text="⏰ 3分鐘已到"))
-        print(f"倒數提醒已發送給：{user_id}")
+        line_bot_api.push_message(user_id, TextSendMessage(text=f"⏰ {minutes}分鐘已到"))
+        print(f"{minutes}分鐘倒數提醒已發送給：{user_id}")
     except Exception as e:
-        print(f"推播倒數提醒失敗：{e}")
+        print(f"推播{minutes}分鐘倒數提醒失敗：{e}")
 
 # 修正後的每週日晚間推播下週行程（只發送到指定群組）
 def weekly_summary():
@@ -173,8 +173,10 @@ EXACT_MATCHES = {
     "本月行程": "this_month",
     "下個月行程": "next_month",
     "明年行程": "next_year",
-    "倒數計時": "countdown",
-    "開始倒數": "countdown",
+    "倒數計時": "countdown_3",
+    "開始倒數": "countdown_3",
+    "倒數3分鐘": "countdown_3",
+    "倒數5分鐘": "countdown_5",
     "哈囉": "hello",
     "hi": "hi",
     "你還會說什麼?": "what_else"
@@ -271,6 +273,9 @@ def handle_message(event):
             "✅ 範例：\n"
             "7/1 14:00 餵小鳥\n"
             "（也可寫成 2025/7/1 14:00 客戶拜訪）\n\n"
+            "⏰ 倒數計時功能：\n"
+            "• 倒數3分鐘 / 倒數計時 / 開始倒數\n"
+            "• 倒數5分鐘\n\n"
             "🌅 群組推播設定：\n"
             "• 設定早安群組 - 設定此群組為推播群組\n"
             "• 查看群組設定 - 查看目前設定\n"
@@ -289,14 +294,23 @@ def handle_message(event):
             reply = "呷飽沒?"
         elif reply_type == "what_else":
             reply = "我愛你❤️"
-        elif reply_type == "countdown":
-            reply = "倒數計時三分鐘開始...\n（3分鐘後我會提醒你：3分鐘已到）"
+        elif reply_type == "countdown_3":
+            reply = "倒數計時3分鐘開始...\n（3分鐘後我會提醒你：3分鐘已到）"
             scheduler.add_job(
                 send_countdown_reminder,
                 trigger="date",
                 run_date=datetime.now() + timedelta(minutes=3),
-                args=[user_id],
-                id=f"countdown_{user_id}_{datetime.now().timestamp()}"
+                args=[user_id, 3],
+                id=f"countdown_3_{user_id}_{datetime.now().timestamp()}"
+            )
+        elif reply_type == "countdown_5":
+            reply = "倒數計時5分鐘開始...\n（5分鐘後我會提醒你：5分鐘已到）"
+            scheduler.add_job(
+                send_countdown_reminder,
+                trigger="date",
+                run_date=datetime.now() + timedelta(minutes=5),
+                args=[user_id, 5],
+                id=f"countdown_5_{user_id}_{datetime.now().timestamp()}"
             )
         elif reply_type:
             reply = get_schedule(reply_type, user_id)
@@ -426,6 +440,9 @@ if __name__ == "__main__":
     print("排程任務:")
     print("- 每天早上 8:30 發送早安訊息")
     print("- 每週日晚上 22:00 發送下週行程摘要")
+    print("倒數計時功能:")
+    print("- 倒數3分鐘：輸入 '倒數3分鐘' 或 '倒數計時' 或 '開始倒數'")
+    print("- 倒數5分鐘：輸入 '倒數5分鐘'")
     
     # 顯示目前排程狀態
     try:
