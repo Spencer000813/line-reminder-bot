@@ -214,26 +214,12 @@ def is_schedule_format(text):
     
     return False
 
-# 產生通用回應
-def generate_general_response(text):
-    """為一般對話產生回應"""
-    text_lower = text.lower()
-    
-    # 一些簡單的關鍵字回應
-    if any(keyword in text_lower for keyword in ["謝謝", "感謝", "thank"]):
-        return "不客氣！有什麼需要幫忙的嗎？"
-    elif any(keyword in text_lower for keyword in ["你好", "hello", "嗨"]):
-        return "你好！我是行程管理機器人，可以幫你管理行程喔！"
-    elif any(keyword in text_lower for keyword in ["幫助", "help", "說明"]):
-        return "輸入「如何增加行程」可以查看使用說明！"
-    else:
-        return "我不太懂你的意思。你可以輸入「如何增加行程」查看使用說明，或是直接用「月/日 時:分 行程內容」的格式來新增行程！"
-
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text.strip()
     lower_text = user_text.lower()
     user_id = getattr(event.source, "group_id", None) or event.source.user_id
+    reply = None  # 預設不回應
 
     # 新增早安相關指令
     if lower_text == "設定早安群組":
@@ -318,10 +304,9 @@ def handle_message(event):
             # 檢查是否為行程格式
             if is_schedule_format(user_text):
                 reply = try_add_schedule(user_text, user_id)
-            else:
-                # 處理一般對話
-                reply = generate_general_response(user_text)
+            # 如果不是行程格式，就不回應（reply 保持 None）
 
+    # 只有在 reply 不為 None 時才回應
     if reply:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
