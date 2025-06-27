@@ -35,6 +35,11 @@ sheet = gc.open_by_key(spreadsheet_id).sheet1
 # 設定要發送推播的群組 ID
 TARGET_GROUP_ID = os.getenv("MORNING_GROUP_ID", "C4e138aa0eb252daa89846daab0102e41")
 
+# 風雲榜功能新增的變數
+RANKING_SPREADSHEET_ID = "1LkPCLbaw5wmPao9g2mMEMRT7eklteR-6RLaJNYP8OQA"
+WORKSHEET_NAME = "工作表2"
+ranking_data = {}  # 風雲榜資料暫存
+
 @app.route("/")
 def home():
     return "LINE Reminder Bot is running."
@@ -48,6 +53,149 @@ def callback():
     except InvalidSignatureError:
         abort(400)
     return "OK"
+
+# 風雲榜功能函數
+def get_worksheet2():
+    """取得工作表2的連線"""
+    try:
+        spreadsheet = gc.open_by_key(RANKING_SPREADSHEET_ID)
+        worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+        return worksheet
+    except Exception as e:
+        print(f"❌ 連接工作表2失敗：{e}")
+        return None
+
+def process_ranking_input(user_id, text):
+    """處理風雲榜輸入"""
+    try:
+        # 如果是觸發詞，初始化使用者的輸入狀態
+        if text.strip() == "風雲榜":
+            ranking_data[user_id] = {
+                "step": 0,
+                "data": ["", "", "", "", "", "", "", "", "", ""],  # 10個欄位的資料
+                "field_names": [
+                    "同學姓名", "實驗三或傳心練習", "練習日期", "空白", "階段", 
+                    "喜歡吃", "不喜歡吃", "喜歡做的事", "不喜歡做的事", "小老師"
+                ]
+            }
+            return (
+                "📊 風雲榜資料輸入開始！\n"
+                "━━━━━━━━━━━━━━━━\n"
+                "📝 請依序輸入以下資料：\n\n"
+                "1️⃣ 同學姓名 (例：奕君,惠華,小嫺,嘉憶,曉汎)\n"
+                "請輸入第1項資料："
+            )
+        
+        # 如果使用者不在輸入狀態中，忽略
+        if user_id not in ranking_data:
+            return None
+        
+        user_session = ranking_data[user_id]
+        current_step = user_session["step"]
+        
+        # 根據步驟處理不同的輸入
+        step_mapping = {
+            0: 0,  # 同學姓名 -> A欄
+            1: 1,  # 實驗三或傳心練習 -> B欄
+            2: 2,  # 練習日期 -> C欄
+            3: 4,  # 階段 -> E欄 (跳過D欄空白)
+            4: 5,  # 喜歡吃 -> F欄
+            5: 6,  # 不喜歡吃 -> G欄
+            6: 7,  # 喜歡做的事 -> H欄
+            7: 8,  # 不喜歡做的事 -> I欄
+            8: 9   # 小老師 -> J欄
+        }
+        
+        if current_step in step_mapping:
+            # 儲存當前輸入的資料
+            data_index = step_mapping[current_step]
+            user_session["data"][data_index] = text.strip()
+            user_session["step"] += 1
+            
+            # 顯示下一步的提示
+            next_step_prompts = [
+                "2️⃣ 實驗三或傳心練習 (例：離世傳心練習)",
+                "3️⃣ 練習日期 (例：6/25)",
+                "4️⃣ 階段 (例：傳心)",
+                "5️⃣ 喜歡吃 (例：9)",
+                "6️⃣ 不喜歡吃 (例：10)",
+                "7️⃣ 喜歡做的事 (例：10)",
+                "8️⃣ 不喜歡做的事 (例：10)",
+                "9️⃣ 小老師 (例：嘉憶家的莎莉)"
+            ]
+            
+            if current_step < len(next_step_prompts):
+                return (
+                    f"✅ 已記錄：{user_session['field_names'][data_index]} = {text}\n\n"
+                    f"{next_step_prompts[current_step]}\n"
+                    f"請輸入第{current_step + 2}項資料："
+                )
+            else:
+                # 所有資料都輸入完成，寫入Google Sheets
+                return write_ranking_to_sheet(user_id, user_session)
+        
+        return "❌ 輸入錯誤，請重新開始輸入「風雲榜」"
+        
+    except Exception as e:
+        print(f"❌ 處理風雲榜輸入失敗：{e}")
+        # 清理使用者的輸入狀態
+        if user_id in ranking_data:
+            del ranking_data[user_id]
+        return "❌ 處理輸入時發生錯誤，請重新開始輸入「風雲榜」"
+
+def write_ranking_to_sheet(user_id, user_session):
+    """將風雲榜資料寫入Google Sheets工作表2"""
+    try:
+        worksheet = get_worksheet2()
+        if not worksheet:
+            return "❌ 無法連接到工作表2"
+        
+        # 準備要寫入的資料 (按照A到J欄的順序)
+        row_data = [
+            user_session["data"][0],  # A欄：同學姓名
+            user_session["data"][1],  # B欄：實驗三或傳心練習
+            user_session["data"][2],  # C欄：練習日期
+            "",                       # D欄：空白
+            user_session["data"][4],  # E欄：階段
+            user_session["data"][5],  # F欄：喜歡吃
+            user_session["data"][6],  # G欄：不喜歡吃
+            user_session["data"][7],  # H欄：喜歡做的事
+            user_session["data"][8],  # I欄：不喜歡做的事
+            user_session["data"][9]   # J欄：小老師
+        ]
+        
+        # 寫入新的一行
+        worksheet.append_row(row_data)
+        
+        # 清理使用者的輸入狀態
+        del ranking_data[user_id]
+        
+        # 格式化成功訊息
+        success_message = (
+            "🎉 風雲榜資料已成功寫入工作表2！\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "📊 已記錄的資料：\n\n"
+            f"👥 同學姓名：{row_data[0]}\n"
+            f"📚 實驗三或傳心練習：{row_data[1]}\n"
+            f"📅 練習日期：{row_data[2]}\n"
+            f"🎯 階段：{row_data[4]}\n"
+            f"🍎 喜歡吃：{row_data[5]}\n"
+            f"🚫 不喜歡吃：{row_data[6]}\n"
+            f"❤️ 喜歡做的事：{row_data[7]}\n"
+            f"💔 不喜歡做的事：{row_data[8]}\n"
+            f"👨‍🏫 小老師：{row_data[9]}\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "✅ 資料已保存到Google Sheets"
+        )
+        
+        return success_message
+        
+    except Exception as e:
+        print(f"❌ 寫入工作表2失敗：{e}")
+        # 清理使用者的輸入狀態
+        if user_id in ranking_data:
+            del ranking_data[user_id]
+        return f"❌ 寫入工作表2失敗：{str(e)}\n請檢查工作表權限或重試"
 
 # 發送早安訊息
 def send_morning_message():
@@ -69,11 +217,25 @@ def send_countdown_reminder(user_id, minutes):
     except Exception as e:
         print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
 
-# 美化的功能說明
+# 美化的功能說明 (已更新包含風雲榜)
 def send_help_message():
     return (
         "🤖 LINE 行程助理 - 完整功能指南\n"
         "━━━━━━━━━━━━━━━━\n\n"
+        "📊 風雲榜資料輸入\n"
+        "═══════════════\n"
+        "🎯 觸發指令：風雲榜\n"
+        "📝 依序輸入9項資料：\n"
+        "   1. 同學姓名\n"
+        "   2. 實驗三或傳心練習\n"
+        "   3. 練習日期\n"
+        "   4. 階段\n"
+        "   5. 喜歡吃\n"
+        "   6. 不喜歡吃\n"
+        "   7. 喜歡做的事\n"
+        "   8. 不喜歡做的事\n"
+        "   9. 小老師\n"
+        "✅ 資料將自動寫入Google工作表2\n\n"
         "📅 行程管理功能\n"
         "═══════════════\n"
         "📌 新增行程格式：\n"
@@ -282,6 +444,13 @@ def handle_message(event):
     lower_text = user_text.lower()
     user_id = getattr(event.source, "group_id", None) or event.source.user_id
     reply = None  # 預設不回應
+
+    # 風雲榜功能處理 - 優先處理
+    if user_text == "風雲榜" or user_id in ranking_data:
+        reply = process_ranking_input(user_id, user_text)
+        if reply:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+            return
 
     # 群組管理指令
     if lower_text == "設定早安群組":
@@ -607,6 +776,10 @@ def try_add_schedule(text, user_id):
 if __name__ == "__main__":
     print("🤖 LINE 行程助理啟動中...")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("📊 風雲榜功能：")
+    print("   🎯 輸入 '風雲榜' 開始資料輸入流程")
+    print("   📝 系統會引導您依序輸入9項資料")
+    print("   ✅ 資料將自動寫入指定的Google工作表2")
     print("📅 自動排程服務：")
     print("   🌅 每天早上 8:30 - 溫馨早安訊息")
     print("   📊 每週日晚上 22:00 - 下週行程摘要")
