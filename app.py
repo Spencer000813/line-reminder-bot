@@ -308,10 +308,48 @@ def send_morning_message():
 # 延遲後推播倒數訊息
 def send_countdown_reminder(user_id, minutes):
     try:
-        line_bot_api.push_message(user_id, TextSendMessage(text=f"⏰ 時間到！{minutes}分鐘倒數計時結束"))
-        print(f"✅ {minutes}分鐘倒數提醒已發送給：{user_id}")
+        # 增加更詳細的日誌記錄
+        print(f"🔔 準備發送 {minutes}分鐘倒數提醒給：{user_id}")
+        
+        # 檢查 user_id 格式
+        if not user_id:
+            print("❌ user_id 為空")
+            return
+            
+        # 構建提醒訊息
+        if minutes == 1:
+            message_text = "⏰ 時間到！1分鐘倒數計時結束\n🔔 該休息一下了！"
+        elif minutes == 3:
+            message_text = "⏰ 時間到！3分鐘倒數計時結束\n✅ 時間管理做得很好！"
+        elif minutes == 5:
+            message_text = "⏰ 時間到！5分鐘倒數計時結束\n🎯 專注時間完成！"
+        else:
+            message_text = f"⏰ 時間到！{minutes}分鐘倒數計時結束"
+        
+        print(f"📤 發送訊息內容：{message_text}")
+        
+        # 發送推播訊息
+        line_bot_api.push_message(user_id, TextSendMessage(text=message_text))
+        print(f"✅ {minutes}分鐘倒數提醒已成功發送給：{user_id}")
+        
     except Exception as e:
         print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
+        print(f"❌ 錯誤詳情：{type(e).__name__}: {str(e)}")
+        # 如果是權限問題，記錄更詳細的資訊
+        if "403" in str(e):
+            print("❌ 可能是權限問題：請檢查 LINE_CHANNEL_ACCESS_TOKEN 是否正確")
+        elif "400" in str(e):
+            print(f"❌ 可能是 user_id 格式問題：{user_id}")
+        
+# 測試倒數計時功能（用於除錯）
+def test_countdown_reminder(user_id, minutes=1):
+    """測試倒數計時功能 - 立即發送提醒"""
+    try:
+        print(f"🧪 測試模式：立即發送 {minutes}分鐘倒數提醒")
+        send_countdown_reminder(user_id, minutes)
+        return "✅ 測試倒數提醒已發送"
+    except Exception as e:
+        return f"❌ 測試倒數提醒失敗：{str(e)}"
 
 # 美化的功能說明 (已更新包含風雲榜和1分鐘倒數)
 def send_help_message():
@@ -365,7 +403,8 @@ def send_help_message():
         "   • 設定早安群組 - 設定推播群組\n"
         "   • 查看群組設定 - 檢視目前設定\n"
         "   • 測試早安 - 測試早安訊息\n"
-        "   • 測試週報 - 手動執行週報\n\n"
+        "   • 測試週報 - 手動執行週報\n"
+        "   • 測試倒數 - 測試倒數計時功能\n\n"
         "📊 系統資訊：\n"
         "   • 查看id - 顯示群組/使用者 ID\n"
         "   • 查看排程 - 檢視系統排程狀態\n"
@@ -608,6 +647,19 @@ def handle_message(event):
                 f"👤 使用者 ID：{user_id_display}\n"
                 f"💬 環境：個人對話"
             )
+    elif lower_text == "測試倒數":
+        # 新增測試倒數功能
+        test_result = test_countdown_reminder(user_id, 1)
+        reply = (
+            f"🧪 測試倒數計時功能\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📋 測試結果：{test_result}\n"
+            f"👤 使用者 ID：{user_id}\n"
+            f"💡 如果沒收到訊息，請檢查以下項目：\n"
+            f"   • LINE Bot 是否為好友\n"
+            f"   • 推播功能是否開啟\n"
+            f"   • ACCESS_TOKEN 是否正確"
+        )
     elif lower_text == "查看排程":
         try:
             jobs = scheduler.get_jobs()
@@ -616,6 +668,9 @@ def handle_message(event):
                 for job in jobs:
                     next_run = job.next_run_time.strftime('%Y/%m/%d %H:%M:%S') if job.next_run_time else "未設定"
                     job_name = "早安訊息" if job.id == "morning_message" else "週報摘要" if job.id == "weekly_summary" else job.id
+                    # 顯示倒數計時的工作
+                    if "countdown" in job.id:
+                        job_name = f"倒數計時 ({job.id})"
                     job_info.append(f"   • {job_name}：{next_run}")
                 reply = (
                     f"⚙️ 系統排程狀態\n"
@@ -639,47 +694,94 @@ def handle_message(event):
         elif reply_type == "what_else":
             reply = "💕 我愛你 ❤️\n\n還有很多功能等你發現喔！\n輸入「功能說明」查看完整指令列表～"
         elif reply_type == "countdown_1":
+            # 增加更詳細的日誌記錄
+            print(f"🕐 使用者 {user_id} 啟動1分鐘倒數計時")
+            
             reply = (
                 "⏰ 1分鐘倒數計時開始！\n"
                 "━━━━━━━━━━━━━━━━\n"
                 "🕐 計時器已啟動\n"
-                "📢 1分鐘後我會提醒您時間到了"
+                "📢 1分鐘後我會提醒您時間到了\n\n"
+                "💡 如果沒收到提醒，請輸入「測試倒數」檢查功能"
             )
-            scheduler.add_job(
-                send_countdown_reminder,
-                trigger="date",
-                run_date=datetime.now() + timedelta(minutes=1),
-                args=[user_id, 1],
-                id=f"countdown_1_{user_id}_{datetime.now().timestamp()}"
-            )
+            
+            # 計算執行時間
+            run_time = datetime.now() + timedelta(minutes=1)
+            job_id = f"countdown_1_{user_id}_{datetime.now().timestamp()}"
+            
+            print(f"📅 排程執行時間：{run_time.strftime('%Y/%m/%d %H:%M:%S')}")
+            print(f"🔑 工作 ID：{job_id}")
+            
+            try:
+                scheduler.add_job(
+                    send_countdown_reminder,
+                    trigger="date",
+                    run_date=run_time,
+                    args=[user_id, 1],
+                    id=job_id
+                )
+                print(f"✅ 1分鐘倒數計時排程已建立")
+            except Exception as e:
+                print(f"❌ 建立倒數計時排程失敗：{e}")
+                reply += f"\n\n❌ 排程建立失敗：{str(e)}"
         elif reply_type == "countdown_3":
+            print(f"🕐 使用者 {user_id} 啟動3分鐘倒數計時")
+            
             reply = (
                 "⏰ 3分鐘倒數計時開始！\n"
                 "━━━━━━━━━━━━━━━━\n"
                 "🕐 計時器已啟動\n"
-                "📢 3分鐘後我會提醒您時間到了"
+                "📢 3分鐘後我會提醒您時間到了\n\n"
+                "💡 如果沒收到提醒，請輸入「測試倒數」檢查功能"
             )
-            scheduler.add_job(
-                send_countdown_reminder,
-                trigger="date",
-                run_date=datetime.now() + timedelta(minutes=3),
-                args=[user_id, 3],
-                id=f"countdown_3_{user_id}_{datetime.now().timestamp()}"
-            )
+            
+            run_time = datetime.now() + timedelta(minutes=3)
+            job_id = f"countdown_3_{user_id}_{datetime.now().timestamp()}"
+            
+            print(f"📅 排程執行時間：{run_time.strftime('%Y/%m/%d %H:%M:%S')}")
+            print(f"🔑 工作 ID：{job_id}")
+            
+            try:
+                scheduler.add_job(
+                    send_countdown_reminder,
+                    trigger="date",
+                    run_date=run_time,
+                    args=[user_id, 3],
+                    id=job_id
+                )
+                print(f"✅ 3分鐘倒數計時排程已建立")
+            except Exception as e:
+                print(f"❌ 建立倒數計時排程失敗：{e}")
+                reply += f"\n\n❌ 排程建立失敗：{str(e)}"
         elif reply_type == "countdown_5":
+            print(f"🕐 使用者 {user_id} 啟動5分鐘倒數計時")
+            
             reply = (
                 "⏰ 5分鐘倒數計時開始！\n"
                 "━━━━━━━━━━━━━━━━\n"
                 "🕐 計時器已啟動\n"
-                "📢 5分鐘後我會提醒您時間到了"
+                "📢 5分鐘後我會提醒您時間到了\n\n"
+                "💡 如果沒收到提醒，請輸入「測試倒數」檢查功能"
             )
-            scheduler.add_job(
-                send_countdown_reminder,
-                trigger="date",
-                run_date=datetime.now() + timedelta(minutes=5),
-                args=[user_id, 5],
-                id=f"countdown_5_{user_id}_{datetime.now().timestamp()}"
-            )
+            
+            run_time = datetime.now() + timedelta(minutes=5)
+            job_id = f"countdown_5_{user_id}_{datetime.now().timestamp()}"
+            
+            print(f"📅 排程執行時間：{run_time.strftime('%Y/%m/%d %H:%M:%S')}")
+            print(f"🔑 工作 ID：{job_id}")
+            
+            try:
+                scheduler.add_job(
+                    send_countdown_reminder,
+                    trigger="date",
+                    run_date=run_time,
+                    args=[user_id, 5],
+                    id=job_id
+                )
+                print(f"✅ 5分鐘倒數計時排程已建立")
+            except Exception as e:
+                print(f"❌ 建立倒數計時排程失敗：{e}")
+                reply += f"\n\n❌ 排程建立失敗：{str(e)}"
         elif reply_type:
             reply = get_schedule(reply_type, user_id)
         else:
