@@ -308,7 +308,12 @@ def send_morning_message():
 # 延遲後推播倒數訊息
 def send_countdown_reminder(user_id, minutes):
     try:
-        line_bot_api.push_message(user_id, TextSendMessage(text=f"⏰ 時間到！{minutes}分鐘倒數計時結束"))
+        if minutes == 1:
+            message = "⏰ 時間到！1分鐘倒數計時結束 🔔"
+        else:
+            message = f"⏰ 時間到！{minutes}分鐘倒數計時結束"
+        
+        line_bot_api.push_message(user_id, TextSendMessage(text=message))
         print(f"✅ {minutes}分鐘倒數提醒已發送給：{user_id}")
     except Exception as e:
         print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
@@ -649,47 +654,66 @@ def handle_message(event):
         elif reply_type == "what_else":
             reply = "💕 我愛你 ❤️\n\n還有很多功能等你發現喔！\n輸入「功能說明」查看完整指令列表～"
         elif reply_type == "countdown_1":
-            reply = (
-                "⏰ 1分鐘倒數計時開始！\n"
-                "━━━━━━━━━━━━━━━━\n"
-                "🕐 計時器已啟動\n"
-                "📢 1分鐘後我會提醒您時間到了"
-            )
-            scheduler.add_job(
-                send_countdown_reminder,
-                trigger="date",
-                run_date=datetime.now() + timedelta(minutes=1),
-                args=[user_id, 1],
-                id=f"countdown_1_{user_id}_{datetime.now().timestamp()}"
-            )
+            try:
+                # 立即回應用戶
+                reply = (
+                    "⏰ 1分鐘倒數計時開始！\n"
+                    "━━━━━━━━━━━━━━━━\n"
+                    "🕐 計時器已啟動\n"
+                    "📢 1分鐘後我會提醒您時間到了"
+                )
+                
+                # 延遲1秒再添加排程任務，避免回應逾時
+                scheduler.add_job(
+                    lambda: scheduler.add_job(
+                        send_countdown_reminder,
+                        trigger="date",
+                        run_date=datetime.now() + timedelta(minutes=1),
+                        args=[user_id, 1],
+                        id=f"countdown_1_{user_id}_{int(datetime.now().timestamp())}"
+                    ),
+                    trigger="date",
+                    run_date=datetime.now() + timedelta(seconds=1)
+                )
+            except Exception as e:
+                print(f"❌ 設定1分鐘倒數失敗：{e}")
+                reply = "❌ 倒數計時設定失敗，請稍後再試"
         elif reply_type == "countdown_3":
-            reply = (
-                "⏰ 3分鐘倒數計時開始！\n"
-                "━━━━━━━━━━━━━━━━\n"
-                "🕐 計時器已啟動\n"
-                "📢 3分鐘後我會提醒您時間到了"
-            )
-            scheduler.add_job(
-                send_countdown_reminder,
-                trigger="date",
-                run_date=datetime.now() + timedelta(minutes=3),
-                args=[user_id, 3],
-                id=f"countdown_3_{user_id}_{datetime.now().timestamp()}"
-            )
+            try:
+                reply = (
+                    "⏰ 3分鐘倒數計時開始！\n"
+                    "━━━━━━━━━━━━━━━━\n"
+                    "🕐 計時器已啟動\n"
+                    "📢 3分鐘後我會提醒您時間到了"
+                )
+                scheduler.add_job(
+                    send_countdown_reminder,
+                    trigger="date",
+                    run_date=datetime.now() + timedelta(minutes=3),
+                    args=[user_id, 3],
+                    id=f"countdown_3_{user_id}_{int(datetime.now().timestamp())}"
+                )
+            except Exception as e:
+                print(f"❌ 設定3分鐘倒數失敗：{e}")
+                reply = "❌ 倒數計時設定失敗，請稍後再試"
         elif reply_type == "countdown_5":
-            reply = (
-                "⏰ 5分鐘倒數計時開始！\n"
-                "━━━━━━━━━━━━━━━━\n"
-                "🕐 計時器已啟動\n"
-                "📢 5分鐘後我會提醒您時間到了"
-            )
-            scheduler.add_job(
-                send_countdown_reminder,
-                trigger="date",
-                run_date=datetime.now() + timedelta(minutes=5),
-                args=[user_id, 5],
-                id=f"countdown_5_{user_id}_{datetime.now().timestamp()}"
-            )
+            try:
+                reply = (
+                    "⏰ 5分鐘倒數計時開始！\n"
+                    "━━━━━━━━━━━━━━━━\n"
+                    "🕐 計時器已啟動\n"
+                    "📢 5分鐘後我會提醒您時間到了"
+                )
+                scheduler.add_job(
+                    send_countdown_reminder,
+                    trigger="date",
+                    run_date=datetime.now() + timedelta(minutes=5),
+                    args=[user_id, 5],
+                    id=f"countdown_5_{user_id}_{int(datetime.now().timestamp())}"
+                )
+            except Exception as e:
+                print(f"❌ 設定5分鐘倒數失敗：{e}")
+                reply = "❌ 倒數計時設定失敗，請稍後再試"
         elif reply_type:
             reply = get_schedule(reply_type, user_id)
         else:
