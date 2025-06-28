@@ -9,12 +9,9 @@ from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# 更新到 LINE Bot SDK v3
-from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, PushMessageRequest
-from linebot.v3.models import TextSendMessage
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 # 初始化 Flask 與 APScheduler
 app = Flask(__name__)
@@ -24,9 +21,7 @@ scheduler.start()
 # LINE 機器人驗證資訊
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-
-# 初始化 LINE Bot API v3
-configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Google Sheets 授權
@@ -58,23 +53,6 @@ def callback():
     except InvalidSignatureError:
         abort(400)
     return "OK"
-
-# 新版 API 推播訊息函數
-def send_push_message(to_id, message_text):
-    """使用新版 API 發送推播訊息"""
-    try:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.push_message(
-                PushMessageRequest(
-                    to=to_id,
-                    messages=[TextSendMessage(text=message_text)]
-                )
-            )
-            return True
-    except Exception as e:
-        print(f"❌ 推播訊息失敗：{e}")
-        return False
 
 # 風雲榜功能函數
 def get_worksheet2():
@@ -320,11 +298,8 @@ def send_morning_message():
     try:
         if TARGET_GROUP_ID != "C4e138aa0eb252daa89846daab0102e41":
             message = "🌅 早安！新的一天開始了 ✨\n\n願你今天充滿活力與美好！"
-            success = send_push_message(TARGET_GROUP_ID, message)
-            if success:
-                print(f"✅ 早安訊息已發送到群組: {TARGET_GROUP_ID}")
-            else:
-                print(f"❌ 早安訊息發送失敗")
+            line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
+            print(f"✅ 早安訊息已發送到群組: {TARGET_GROUP_ID}")
         else:
             print("⚠️ 推播群組 ID 尚未設定")
     except Exception as e:
@@ -333,12 +308,8 @@ def send_morning_message():
 # 延遲後推播倒數訊息
 def send_countdown_reminder(user_id, minutes):
     try:
-        message = f"⏰ 時間到！{minutes}分鐘倒數計時結束"
-        success = send_push_message(user_id, message)
-        if success:
-            print(f"✅ {minutes}分鐘倒數提醒已發送給：{user_id}")
-        else:
-            print(f"❌ {minutes}分鐘倒數提醒發送失敗")
+        line_bot_api.push_message(user_id, TextSendMessage(text=f"⏰ 時間到！{minutes}分鐘倒數計時結束"))
+        print(f"✅ {minutes}分鐘倒數提醒已發送給：{user_id}")
     except Exception as e:
         print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
 
@@ -497,11 +468,8 @@ def weekly_summary():
             message += "\n💡 記得提前準備，祝您一週順利！"
         
         try:
-            success = send_push_message(TARGET_GROUP_ID, message)
-            if success:
-                print(f"✅ 已發送週報摘要到群組：{TARGET_GROUP_ID}")
-            else:
-                print(f"❌ 週報摘要發送失敗")
+            line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
+            print(f"✅ 已發送週報摘要到群組：{TARGET_GROUP_ID}")
         except Exception as e:
             print(f"❌ 推播週報到群組失敗：{e}")
                 
@@ -580,7 +548,7 @@ def is_schedule_format(text):
     
     return False
 
-@handler.add(MessageEvent, message=TextMessageContent)
+@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text.strip()
     lower_text = user_text.lower()
@@ -591,14 +559,7 @@ def handle_message(event):
     if user_text == "風雲榜" or (user_text.count('\n') >= 8 and len(user_text.strip().split('\n')) >= 9):
         reply = process_ranking_input(user_id, user_text)
         if reply:
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextSendMessage(text=reply)]
-                    )
-                )
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
 
     # 群組管理指令
@@ -739,14 +700,7 @@ def handle_message(event):
 
     # 只有在 reply 不為 None 時才回應
     if reply:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextSendMessage(text=reply)]
-                )
-            )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 def get_schedule(period, user_id):
     try:
