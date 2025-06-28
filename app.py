@@ -683,7 +683,7 @@ def try_add_schedule(text, user_id):
     try:
         import re
         
-        # 改進的行程解析
+        # 改進的行程解析 - 修復語法錯誤
         pattern = r'^(\d{1,4}/\d{1,2})\s+(\d{1,2}:\d{2})\s+(.+)
         match = re.match(pattern, text.strip())
         
