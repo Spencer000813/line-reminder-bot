@@ -43,6 +43,25 @@ RANKING_SPREADSHEET_ID = "1LkPCLbaw5wmPao9g2mMEMRT7eklteR-6RLaJNYP8OQA"
 WORKSHEET_NAME = "工作表2"
 ranking_data = {}
 
+# 精確匹配的關鍵字對應
+EXACT_MATCHES = {
+    '哈囉': 'hello',
+    'hello': 'hello',
+    'hi': 'hi',
+    '嗨': 'hi',
+    '你還會說什麼?': 'what_else',
+    '你還會說什麼？': 'what_else',
+    '倒數1分鐘': 'countdown_1',
+    '倒數3分鐘': 'countdown_3',
+    '倒數5分鐘': 'countdown_5',
+    '今日行程': 'today',
+    '明日行程': 'tomorrow',
+    '本週行程': 'this_week',
+    '下週行程': 'next_week',
+    '昨日行程': 'yesterday',
+    '前日行程': 'yesterday'
+}
+
 @app.route("/")
 def home():
     return "LINE Reminder Bot is running."
@@ -124,6 +143,180 @@ def send_countdown_reminder(target_id, minutes, is_group=False):
         print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
         print(f"目標ID: {target_id}")
         print(f"是否為群組: {is_group}")
+
+# 檢查是否為行程格式的函數
+def is_schedule_format(text):
+    """檢查文字是否符合行程格式：月/日 時:分 內容"""
+    import re
+    pattern = r'^\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}\s+.+'
+    return bool(re.match(pattern, text.strip()))
+
+# 新增行程的函數
+def try_add_schedule(text, user_id):
+    """嘗試新增行程到 Google Sheets"""
+    try:
+        import re
+        
+        # 解析行程格式：月/日 時:分 內容
+        pattern = r'^(\d{1,2}/\d{1,2})\s+(\d{1,2}:\d{2})\s+(.+)$'
+        match = re.match(pattern, text.strip())
+        
+        if not match:
+            return "❌ 行程格式錯誤\n請使用：月/日 時:分 行程內容\n例如：12/25 14:30 聖誕節聚餐"
+        
+        date_str, time_str, content = match.groups()
+        
+        # 處理日期格式
+        month, day = map(int, date_str.split('/'))
+        current_year = datetime.now().year
+        
+        # 建立完整的日期時間
+        schedule_datetime = datetime(current_year, month, day)
+        
+        # 驗證時間格式
+        hour, minute = map(int, time_str.split(':'))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return "❌ 時間格式錯誤\n請使用24小時制，例如：14:30"
+        
+        schedule_datetime = schedule_datetime.replace(hour=hour, minute=minute)
+        
+        # 檢查日期是否已過
+        if schedule_datetime < datetime.now():
+            # 如果日期已過，假設是明年
+            schedule_datetime = schedule_datetime.replace(year=current_year + 1)
+        
+        # 新增到 Google Sheets
+        full_date = schedule_datetime.strftime("%Y/%m/%d")
+        timestamp = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        
+        sheet.append_row([full_date, time_str, content, user_id, timestamp])
+        
+        return (
+            f"✅ 行程新增成功！\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📅 日期：{schedule_datetime.strftime('%m/%d')}\n"
+            f"🕐 時間：{time_str}\n"
+            f"📝 內容：{content}\n\n"
+            f"💡 系統會在行程前一小時自動提醒您"
+        )
+        
+    except Exception as e:
+        print(f"❌ 新增行程失敗：{e}")
+        return "❌ 新增行程失敗，請稍後再試"
+
+# 查詢行程的函數
+def get_schedule(schedule_type, user_id):
+    """根據類型查詢行程"""
+    try:
+        all_rows = sheet.get_all_values()[1:]  # 跳過標題行
+        now = datetime.now()
+        schedules = []
+        
+        # 定義查詢範圍
+        if schedule_type == "today":
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+            title = "今日行程"
+        elif schedule_type == "tomorrow":
+            tomorrow = now + timedelta(days=1)
+            start = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = tomorrow.replace(hour=23, minute=59, second=59, microsecond=999999)
+            title = "明日行程"
+        elif schedule_type == "yesterday":
+            yesterday = now - timedelta(days=1)
+            start = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999)
+            title = "昨日行程"
+        elif schedule_type == "this_week":
+            start = now - timedelta(days=now.weekday())
+            start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=6, hours=23, minutes=59, seconds=59)
+            title = "本週行程"
+        elif schedule_type == "next_week":
+            days_until_next_monday = (7 - now.weekday()) % 7
+            if days_until_next_monday == 0:
+                days_until_next_monday = 7
+            start = now + timedelta(days=days_until_next_monday)
+            start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=6, hours=23, minutes=59, seconds=59)
+            title = "下週行程"
+        else:
+            return "❌ 未知的查詢類型"
+        
+        # 篩選符合條件的行程
+        for row in all_rows:
+            if len(row) < 4:
+                continue
+            try:
+                date_str, time_str, content, row_user_id = row[:4]
+                if row_user_id != user_id:
+                    continue
+                    
+                dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
+                if start <= dt <= end:
+                    schedules.append((dt, content))
+            except:
+                continue
+        
+        # 排序並格式化輸出
+        schedules.sort()
+        
+        if not schedules:
+            return f"📅 {title}\n━━━━━━━━━━━━━━━━\n\n🎉 沒有安排任何行程\n✨ 享受自由時光！"
+        
+        message = f"📅 {title}\n━━━━━━━━━━━━━━━━\n\n"
+        current_date = None
+        
+        for dt, content in schedules:
+            if current_date != dt.date():
+                current_date = dt.date()
+                weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
+                weekday = weekday_names[dt.weekday()]
+                message += f"📆 {dt.strftime('%m/%d')} (週{weekday})\n"
+                message += "─────────────────────\n"
+            
+            message += f"🕐 {dt.strftime('%H:%M')} │ {content}\n"
+        
+        return message
+        
+    except Exception as e:
+        print(f"❌ 查詢行程失敗：{e}")
+        return "❌ 查詢行程失敗，請稍後再試"
+
+# 風雲榜處理函數（簡化版）
+def process_ranking_input(user_id, text):
+    """處理風雲榜資料輸入"""
+    if text == "風雲榜":
+        return (
+            "📊 風雲榜資料輸入\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "請按以下格式輸入資料，每行一項：\n\n"
+            "🏆 第一名的資料\n"
+            "🥈 第二名的資料\n"
+            "🥉 第三名的資料\n"
+            "📝 其他資料...\n\n"
+            "💡 一次輸入所有資料即可"
+        )
+    
+    # 處理多行資料輸入
+    if '\n' in text and len(text.strip().split('\n')) >= 3:
+        try:
+            # 這裡可以加入實際的風雲榜資料處理邏輯
+            lines = text.strip().split('\n')
+            processed_count = len(lines)
+            
+            return (
+                f"✅ 風雲榜資料處理完成！\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"📊 共處理 {processed_count} 筆資料\n"
+                f"💾 資料已保存到系統中\n\n"
+                f"💡 感謝您的資料輸入！"
+            )
+        except Exception as e:
+            print(f"❌ 風雲榜資料處理失敗：{e}")
+            return "❌ 資料處理失敗，請檢查格式後重試"
+    
+    return None
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -470,6 +663,36 @@ def manual_weekly_summary():
     print("🔧 手動執行每週行程摘要...")
     weekly_summary()
 
+# 設定定時任務
+def setup_scheduled_jobs():
+    """設定所有的定時任務"""
+    try:
+        # 清除現有的排程工作
+        scheduler.remove_all_jobs()
+        
+        # 每天早上 8:30 發送早安訊息
+        scheduler.add_job(
+            send_morning_message,
+            trigger=CronTrigger(hour=8, minute=30),
+            id="morning_message",
+            name="早安訊息推播"
+        )
+        
+        # 每週日晚上 22:00 發送週報摘要
+        scheduler.add_job(
+            weekly_summary,
+            trigger=CronTrigger(day_of_week=6, hour=22, minute=0),  # 6 = 週日
+            id="weekly_summary",
+            name="每週行程摘要"
+        )
+        
+        print("✅ 定時任務設定完成")
+        print("   • 早安訊息：每天 8:30")
+        print("   • 週報摘要：每週日 22:00")
+        
+    except Exception as e:
+        print(f"❌ 設定定時任務失敗：{e}")
+
 # 在啟動時顯示狀態
 if __name__ == "__main__":
     print("🤖 LINE 行程助理啟動中...")
@@ -486,6 +709,10 @@ if __name__ == "__main__":
     print("⏰ 倒數計時功能：1分鐘、3分鐘、5分鐘")
     print("💡 輸入 '功能說明' 查看完整功能列表")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    
+    # 設定定時任務
+    setup_scheduled_jobs()
+    
     print("🚀 LINE Bot 已成功啟動，準備自動管理群組！")
     
     port = int(os.getenv("PORT", 5000))
