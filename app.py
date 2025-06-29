@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 
@@ -8,6 +9,8 @@ from google.oauth2.service_account import Credentials
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.executors.pool import ThreadPoolExecutor
+import pytz
 
 # 更新為 LINE Bot SDK v3
 from linebot.v3 import WebhookHandler
@@ -22,30 +25,65 @@ from linebot.v3.messaging import (
     TextMessage
 )
 
-# 初始化 Flask 與 APScheduler
+# 設定日誌
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 初始化 Flask
 app = Flask(__name__)
 
-# 確保調度器配置正確
-scheduler = BackgroundScheduler(timezone='Asia/Taipei')
+# 設定正確的時區
+TAIWAN_TZ = pytz.timezone('Asia/Taipei')
+
+# 設定執行器和任務預設值
+executors = {
+    'default': ThreadPoolExecutor(20),
+}
+
+job_defaults = {
+    'coalesce': False,
+    'max_instances': 3,
+    'misfire_grace_time': 30  # 允許 30 秒的延遲執行
+}
+
+# 確保調度器配置正確，明確指定時區
+scheduler = BackgroundScheduler(
+    executors=executors,
+    job_defaults=job_defaults,
+    timezone=TAIWAN_TZ
+)
 scheduler.start()
 
-print("🔧 APScheduler 已啟動")
+logger.info("🔧 APScheduler 已啟動")
 
 # LINE 機器人驗證資訊
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+
+# 檢查環境變數
+if not LINE_CHANNEL_ACCESS_TOKEN:
+    logger.error("❌ LINE_CHANNEL_ACCESS_TOKEN 未設定")
+if not LINE_CHANNEL_SECRET:
+    logger.error("❌ LINE_CHANNEL_SECRET 未設定")
 
 # 使用 v3 API 初始化
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Google Sheets 授權
-SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-credentials = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
-gc = gspread.authorize(credentials)
-spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
-sheet = gc.open_by_key(spreadsheet_id).sheet1
+try:
+    SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
+    SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+    credentials = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
+    gc = gspread.authorize(credentials)
+    spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
+    sheet = gc.open_by_key(spreadsheet_id).sheet1
+    logger.info("✅ Google Sheets 連接成功")
+except Exception as e:
+    logger.error(f"❌ Google Sheets 連接失敗：{e}")
 
 # 設定要發送推播的群組 ID
 TARGET_GROUP_ID = os.getenv("MORNING_GROUP_ID", "C4e138aa0eb252daa89846daab0102e41")
@@ -69,6 +107,40 @@ def callback():
         abort(400)
     return "OK"
 
+# 增強的推播功能與錯誤處理
+def send_line_message(user_id, message, message_type="推播"):
+    """發送 LINE 訊息並記錄詳細日誌"""
+    try:
+        if not LINE_CHANNEL_ACCESS_TOKEN:
+            logger.error("LINE_CHANNEL_ACCESS_TOKEN 未設定")
+            return False
+            
+        logger.info(f"🚀 準備發送{message_type}給用戶: {user_id}")
+        logger.info(f"📝 訊息內容: {message}")
+        
+        # 發送訊息
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message(
+                PushMessageRequest(
+                    to=user_id,
+                    messages=[TextMessage(text=message)]
+                )
+            )
+        
+        logger.info(f"✅ {message_type}發送成功: {user_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ LINE API 錯誤: {str(e)}")
+        logger.error(f"❌ 用戶ID: {user_id}")
+        
+        # 記錄詳細錯誤
+        import traceback
+        logger.error(f"詳細錯誤: {traceback.format_exc()}")
+        
+        return False
+
 # 風雲榜功能函數
 def get_worksheet2():
     """取得工作表2的連線"""
@@ -77,7 +149,7 @@ def get_worksheet2():
         worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
         return worksheet
     except Exception as e:
-        print(f"❌ 連接工作表2失敗：{e}")
+        logger.error(f"❌ 連接工作表2失敗：{e}")
         return None
 
 def process_ranking_input(user_id, text):
@@ -123,7 +195,7 @@ def process_ranking_input(user_id, text):
         return None
         
     except Exception as e:
-        print(f"❌ 處理風雲榜輸入失敗：{e}")
+        logger.error(f"❌ 處理風雲榜輸入失敗：{e}")
         return "❌ 處理輸入時發生錯誤，請檢查資料格式後重試"
 
 def process_batch_ranking_data(user_id, lines):
@@ -173,7 +245,7 @@ def process_batch_ranking_data(user_id, lines):
         return write_ranking_to_sheet_batch(user_id, ranking_data_batch)
         
     except Exception as e:
-        print(f"❌ 處理批量資料失敗：{e}")
+        logger.error(f"❌ 處理批量資料失敗：{e}")
         return f"❌ 處理資料失敗：{str(e)}\n請檢查資料格式後重試"
 
 def write_ranking_to_sheet_batch(user_id, data_batch):
@@ -234,7 +306,7 @@ def write_ranking_to_sheet_batch(user_id, data_batch):
         return success_message
         
     except Exception as e:
-        print(f"❌ 寫入工作表2失敗：{e}")
+        logger.error(f"❌ 寫入工作表2失敗：{e}")
         return f"❌ 寫入工作表2失敗：{str(e)}\n請檢查工作表權限或重試"
 
 def write_ranking_to_sheet(user_id, user_session):
@@ -298,7 +370,7 @@ def write_ranking_to_sheet(user_id, user_session):
         return success_message
         
     except Exception as e:
-        print(f"❌ 寫入工作表2失敗：{e}")
+        logger.error(f"❌ 寫入工作表2失敗：{e}")
         # 清理使用者的輸入狀態
         if user_id in ranking_data:
             del ranking_data[user_id]
@@ -309,41 +381,34 @@ def send_morning_message():
     try:
         if TARGET_GROUP_ID != "C4e138aa0eb252daa89846daab0102e41":
             message = "🌅 早安！新的一天開始了 ✨\n\n願你今天充滿活力與美好！"
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.push_message(
-                    PushMessageRequest(
-                        to=TARGET_GROUP_ID,
-                        messages=[TextMessage(text=message)]
-                    )
-                )
-            print(f"✅ 早安訊息已發送到群組: {TARGET_GROUP_ID}")
+            success = send_line_message(TARGET_GROUP_ID, message, "早安訊息")
+            if success:
+                logger.info(f"✅ 早安訊息已發送到群組: {TARGET_GROUP_ID}")
+            else:
+                logger.error(f"❌ 早安訊息發送失敗")
         else:
-            print("⚠️ 推播群組 ID 尚未設定")
+            logger.warning("⚠️ 推播群組 ID 尚未設定")
     except Exception as e:
-        print(f"❌ 發送早安訊息失敗：{e}")
+        logger.error(f"❌ 發送早安訊息失敗：{e}")
 
 # 延遲後推播倒數訊息
 def send_countdown_reminder(user_id, minutes):
     """發送倒數計時結束提醒"""
     try:
-        message = f"⏰ 時間到！{minutes}分鐘倒數計時結束 🔔\n\n時間過得真快呢！"
+        current_time = datetime.now(TAIWAN_TZ)
+        message = f"⏰ 時間到！{minutes}分鐘倒數計時結束 🔔\n\n時間過得真快呢！\n📅 {current_time.strftime('%H:%M:%S')}"
         
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.push_message(
-                PushMessageRequest(
-                    to=user_id,
-                    messages=[TextMessage(text=message)]
-                )
-            )
-        print(f"✅ {minutes}分鐘倒數提醒已發送給：{user_id}")
+        success = send_line_message(user_id, message, f"{minutes}分鐘倒數提醒")
+        if success:
+            logger.info(f"✅ {minutes}分鐘倒數提醒已發送給：{user_id}")
+        else:
+            logger.error(f"❌ {minutes}分鐘倒數提醒發送失敗")
         
     except Exception as e:
-        print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
+        logger.error(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
         # 如果推播失敗，記錄詳細錯誤
         import traceback
-        print(f"詳細錯誤：{traceback.format_exc()}")
+        logger.error(f"詳細錯誤：{traceback.format_exc()}")
 
 # 美化的功能說明 (已更新包含風雲榜)
 def send_help_message():
@@ -410,15 +475,15 @@ def send_help_message():
 
 # 美化的週報推播
 def weekly_summary():
-    print("🔄 開始執行每週行程摘要...")
+    logger.info("🔄 開始執行每週行程摘要...")
     try:
         # 檢查是否已設定群組 ID
         if TARGET_GROUP_ID == "C4e138aa0eb252daa89846daab0102e41":
-            print("⚠️ 週報群組 ID 尚未設定，跳過週報推播")
+            logger.warning("⚠️ 週報群組 ID 尚未設定，跳過週報推播")
             return
             
         all_rows = sheet.get_all_values()[1:]
-        now = datetime.now()
+        now = datetime.now(TAIWAN_TZ)  # 使用台灣時區
         
         # 計算下週一到下週日的範圍
         days_until_next_monday = (7 - now.weekday()) % 7
@@ -430,7 +495,7 @@ def weekly_summary():
         start = start.replace(hour=0, minute=0, second=0, microsecond=0)
         end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
         
-        print(f"📊 查詢時間範圍：{start.strftime('%Y/%m/%d %H:%M')} 到 {end.strftime('%Y/%m/%d %H:%M')}")
+        logger.info(f"📊 查詢時間範圍：{start.strftime('%Y/%m/%d %H:%M')} 到 {end.strftime('%Y/%m/%d %H:%M')}")
         
         user_schedules = {}
 
@@ -440,13 +505,15 @@ def weekly_summary():
             try:
                 date_str, time_str, content, user_id, _ = row
                 dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
+                # 確保比較時使用正確的時區
+                dt = TAIWAN_TZ.localize(dt) if dt.tzinfo is None else dt.astimezone(TAIWAN_TZ)
                 if start <= dt <= end:
                     user_schedules.setdefault(user_id, []).append((dt, content))
             except Exception as e:
-                print(f"❌ 處理行程資料失敗：{e}")
+                logger.error(f"❌ 處理行程資料失敗：{e}")
                 continue
 
-        print(f"📈 找到 {len(user_schedules)} 位使用者有下週行程")
+        logger.info(f"📈 找到 {len(user_schedules)} 位使用者有下週行程")
         
         if not user_schedules:
             # 如果沒有行程，也發送提醒
@@ -489,37 +556,33 @@ def weekly_summary():
             message += "\n💡 記得提前準備，祝您一週順利！"
         
         try:
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.push_message(
-                    PushMessageRequest(
-                        to=TARGET_GROUP_ID,
-                        messages=[TextMessage(text=message)]
-                    )
-                )
-            print(f"✅ 已發送週報摘要到群組：{TARGET_GROUP_ID}")
+            success = send_line_message(TARGET_GROUP_ID, message, "週報摘要")
+            if success:
+                logger.info(f"✅ 已發送週報摘要到群組：{TARGET_GROUP_ID}")
+            else:
+                logger.error(f"❌ 週報摘要發送失敗")
         except Exception as e:
-            print(f"❌ 推播週報到群組失敗：{e}")
+            logger.error(f"❌ 推播週報到群組失敗：{e}")
                 
-        print("✅ 每週行程摘要執行完成")
+        logger.info("✅ 每週行程摘要執行完成")
                 
     except Exception as e:
-        print(f"❌ 每週行程摘要執行失敗：{e}")
+        logger.error(f"❌ 每週行程摘要執行失敗：{e}")
 
 # 手動觸發週報（用於測試）
 def manual_weekly_summary():
-    print("🔧 手動執行每週行程摘要...")
+    logger.info("🔧 手動執行每週行程摘要...")
     weekly_summary()
 
-# 排程任務
+# 排程任務 - 使用台灣時區
 scheduler.add_job(
     weekly_summary, 
-    CronTrigger(day_of_week="sun", hour=22, minute=0),
+    CronTrigger(day_of_week="sun", hour=22, minute=0, timezone=TAIWAN_TZ),
     id="weekly_summary"
 )
 scheduler.add_job(
     send_morning_message, 
-    CronTrigger(hour=8, minute=30),
+    CronTrigger(hour=8, minute=30, timezone=TAIWAN_TZ),
     id="morning_message"
 )
 
@@ -582,6 +645,8 @@ def handle_message(event):
     user_id = getattr(event.source, "group_id", None) or event.source.user_id
     reply = None  # 預設不回應
     
+    logger.info(f"📨 收到訊息 - 用戶: {user_id}, 內容: {user_text}")
+    
     # 檢查風雲榜功能
     ranking_reply = process_ranking_input(user_id, user_text)
     if ranking_reply:
@@ -598,19 +663,24 @@ def handle_message(event):
             reply = f"⏰ 開始 {minutes} 分鐘倒數計時！\n時間到我會通知你 🔔"
             
             # 生成唯一的 job ID
-            job_id = f"countdown_{user_id}_{datetime.now().timestamp()}"
+            current_time = datetime.now(TAIWAN_TZ)
+            job_id = f"countdown_{user_id}_{int(current_time.timestamp())}"
             
             try:
+                # 計算提醒時間，使用台灣時區
+                reminder_time = current_time + timedelta(minutes=minutes)
+                
                 scheduler.add_job(
                     send_countdown_reminder,
                     'date',
-                    run_date=datetime.now() + timedelta(minutes=minutes),
+                    run_date=reminder_time,
                     args=[user_id, minutes],
-                    id=job_id
+                    id=job_id,
+                    timezone=TAIWAN_TZ
                 )
-                print(f"✅ 倒數計時任務已設定：{minutes}分鐘，Job ID: {job_id}")
+                logger.info(f"✅ 倒數計時任務已設定：{minutes}分鐘，Job ID: {job_id}, 執行時間: {reminder_time}")
             except Exception as e:
-                print(f"❌ 設定倒數計時失敗：{e}")
+                logger.error(f"❌ 設定倒數計時失敗：{e}")
                 reply += f"\n⚠️ 提醒設定可能失敗，請重試"
         elif command == "hello":
             reply = "哈囉！👋 我是你的行程助理！\n\n輸入「功能說明」查看我能做什麼 😊"
@@ -639,7 +709,7 @@ def handle_message(event):
         if jobs:
             job_info = []
             for job in jobs:
-                next_run = job.next_run_time.strftime('%Y-%m-%d %H:%M:%S') if job.next_run_time else 'None'
+                next_run = job.next_run_time.strftime('%Y-%m-%d %H:%M:%S %Z') if job.next_run_time else 'None'
                 job_info.append(f"• {job.id}: {next_run}")
             reply = f"⚙️ 系統排程狀態：\n" + "\n".join(job_info)
         else:
@@ -651,20 +721,25 @@ def handle_message(event):
     
     # 如果有回應訊息，就發送
     if reply:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=reply)]
+        try:
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply)]
+                    )
                 )
-            )
+            logger.info(f"✅ 回應訊息已送出給用戶: {user_id}")
+        except Exception as e:
+            logger.error(f"❌ 回應訊息失敗: {e}")
 
 def handle_set_morning_group(user_id, text):
     """處理設定早安群組"""
     global TARGET_GROUP_ID
     if user_id.startswith("C"):  # 群組ID以C開頭
         TARGET_GROUP_ID = user_id
+        logger.info(f"✅ 早安群組已設定為: {TARGET_GROUP_ID}")
         return "✅ 早安群組已設定成功！\n🌅 每天早上8:30會推播早安訊息"
     else:
         return "❌ 請在群組中使用此指令"
@@ -673,7 +748,7 @@ def get_schedule_by_period(user_id, period):
     """根據時間期間獲取行程"""
     try:
         all_rows = sheet.get_all_values()[1:]
-        now = datetime.now()
+        now = datetime.now(TAIWAN_TZ)  # 使用台灣時區
         
         # 設定時間範圍
         if period == "today":
@@ -701,24 +776,24 @@ def get_schedule_by_period(user_id, period):
         elif period == "this_month":
             start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             if now.month == 12:
-                end = datetime(now.year + 1, 1, 1) - timedelta(microseconds=1)
+                end = datetime(now.year + 1, 1, 1, tzinfo=TAIWAN_TZ) - timedelta(microseconds=1)
             else:
-                end = datetime(now.year, now.month + 1, 1) - timedelta(microseconds=1)
+                end = datetime(now.year, now.month + 1, 1, tzinfo=TAIWAN_TZ) - timedelta(microseconds=1)
             title = "📅 本月行程"
         elif period == "next_month":
             if now.month == 12:
-                start = datetime(now.year + 1, 1, 1)
-                end = datetime(now.year + 1, 2, 1) - timedelta(microseconds=1)
+                start = datetime(now.year + 1, 1, 1, tzinfo=TAIWAN_TZ)
+                end = datetime(now.year + 1, 2, 1, tzinfo=TAIWAN_TZ) - timedelta(microseconds=1)
             else:
-                start = datetime(now.year, now.month + 1, 1)
+                start = datetime(now.year, now.month + 1, 1, tzinfo=TAIWAN_TZ)
                 if now.month == 11:
-                    end = datetime(now.year + 1, 1, 1) - timedelta(microseconds=1)
+                    end = datetime(now.year + 1, 1, 1, tzinfo=TAIWAN_TZ) - timedelta(microseconds=1)
                 else:
-                    end = datetime(now.year, now.month + 2, 1) - timedelta(microseconds=1)
+                    end = datetime(now.year, now.month + 2, 1, tzinfo=TAIWAN_TZ) - timedelta(microseconds=1)
             title = "📅 下個月行程"
         elif period == "next_year":
-            start = datetime(now.year + 1, 1, 1)
-            end = datetime(now.year + 2, 1, 1) - timedelta(microseconds=1)
+            start = datetime(now.year + 1, 1, 1, tzinfo=TAIWAN_TZ)
+            end = datetime(now.year + 2, 1, 1, tzinfo=TAIWAN_TZ) - timedelta(microseconds=1)
             title = "📅 明年行程"
         
         # 查詢行程
@@ -730,9 +805,11 @@ def get_schedule_by_period(user_id, period):
                 date_str, time_str, content, row_user_id, _ = row
                 if row_user_id == user_id:
                     dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
+                    dt = TAIWAN_TZ.localize(dt) if dt.tzinfo is None else dt.astimezone(TAIWAN_TZ)
                     if start <= dt <= end:
                         schedules.append((dt, content))
-            except:
+            except Exception as e:
+                logger.warning(f"⚠️ 解析行程資料失敗: {e}")
                 continue
         
         # 格式化回應
@@ -755,7 +832,7 @@ def get_schedule_by_period(user_id, period):
         return message
         
     except Exception as e:
-        print(f"❌ 查詢行程失敗：{e}")
+        logger.error(f"❌ 查詢行程失敗：{e}")
         return "❌ 查詢行程時發生錯誤"
 
 def add_schedule(user_id, text):
@@ -774,7 +851,7 @@ def add_schedule(user_id, text):
             date_segments = date_part.split("/")
             if len(date_segments) == 2:
                 month, day = map(int, date_segments)
-                year = datetime.now().year
+                year = datetime.now(TAIWAN_TZ).year
             elif len(date_segments) == 3:
                 year, month, day = map(int, date_segments)
             else:
@@ -792,11 +869,12 @@ def add_schedule(user_id, text):
         else:
             return "❌ 時間格式錯誤"
         
-        # 建立 datetime 物件
-        schedule_time = datetime(year, month, day, hour, minute)
+        # 建立 datetime 物件，使用台灣時區
+        schedule_time = TAIWAN_TZ.localize(datetime(year, month, day, hour, minute))
+        current_time = datetime.now(TAIWAN_TZ)
         
         # 檢查是否為過去時間
-        if schedule_time < datetime.now():
+        if schedule_time < current_time:
             return "❌ 不能設定過去的時間"
         
         # 寫入 Google Sheets
@@ -807,14 +885,17 @@ def add_schedule(user_id, text):
         
         # 設定提醒（行程前一小時）
         reminder_time = schedule_time - timedelta(hours=1)
-        if reminder_time > datetime.now():
+        if reminder_time > current_time:
+            job_id = f"remind_{user_id}_{int(schedule_time.timestamp())}"
             scheduler.add_job(
                 send_schedule_reminder,
                 'date',
                 run_date=reminder_time,
                 args=[user_id, content, schedule_time],
-                id=f"remind_{user_id}_{schedule_time.timestamp()}"
+                id=job_id,
+                timezone=TAIWAN_TZ
             )
+            logger.info(f"✅ 行程提醒已設定: {job_id}, 提醒時間: {reminder_time}")
         
         return (
             f"✅ 行程新增成功！\n\n"
@@ -824,35 +905,47 @@ def add_schedule(user_id, text):
             f"⏰ 將在行程前一小時提醒您"
         )
         
-    except ValueError:
+    except ValueError as e:
+        logger.error(f"❌ 日期或時間格式錯誤: {e}")
         return "❌ 日期或時間格式錯誤"
     except Exception as e:
-        print(f"❌ 新增行程失敗：{e}")
+        logger.error(f"❌ 新增行程失敗：{e}")
         return "❌ 新增行程時發生錯誤"
 
 def send_schedule_reminder(user_id, content, schedule_time):
     """發送行程提醒"""
     try:
-        message = f"⏰ 行程提醒\n\n📅 {schedule_time.strftime('%m/%d %H:%M')}\n📝 {content}\n\n還有一小時就要開始囉！"
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.push_message(
-                PushMessageRequest(
-                    to=user_id,
-                    messages=[TextMessage(text=message)]
-                )
-            )
-        print(f"✅ 行程提醒已發送：{content}")
+        current_time = datetime.now(TAIWAN_TZ)
+        message = f"⏰ 行程提醒\n\n📅 {schedule_time.strftime('%m/%d %H:%M')}\n📝 {content}\n\n還有一小時就要開始囉！\n📍 {current_time.strftime('%H:%M:%S')}"
+        
+        success = send_line_message(user_id, message, "行程提醒")
+        if success:
+            logger.info(f"✅ 行程提醒已發送：{content}")
+        else:
+            logger.error(f"❌ 行程提醒發送失敗：{content}")
     except Exception as e:
-        print(f"❌ 發送行程提醒失敗：{e}")
+        logger.error(f"❌ 發送行程提醒失敗：{e}")
 
 if __name__ == "__main__":
     # 修復端口綁定問題 - 這是關鍵修復
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))  # Render 預設使用 10000
     host = '0.0.0.0'  # 重要：必須綁定到 0.0.0.0 而不是 localhost
     
-    print(f"🚀 LINE Reminder Bot 正在啟動...")
-    print(f"📡 監聽地址：{host}:{port}")
+    logger.info(f"🚀 LINE Reminder Bot 正在啟動...")
+    logger.info(f"📡 監聽地址：{host}:{port}")
+    logger.info(f"🌍 時區設定：{TAIWAN_TZ}")
+    logger.info(f"⏰ 當前台灣時間：{datetime.now(TAIWAN_TZ)}")
+    
+    # 檢查重要環境變數
+    if LINE_CHANNEL_ACCESS_TOKEN:
+        logger.info("✅ LINE_CHANNEL_ACCESS_TOKEN 已設定")
+    else:
+        logger.error("❌ LINE_CHANNEL_ACCESS_TOKEN 未設定")
+        
+    if LINE_CHANNEL_SECRET:
+        logger.info("✅ LINE_CHANNEL_SECRET 已設定")
+    else:
+        logger.error("❌ LINE_CHANNEL_SECRET 未設定")
     
     # 啟動 Flask 應用
     app.run(
