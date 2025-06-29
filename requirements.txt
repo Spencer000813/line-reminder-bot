@@ -1,8 +1,8 @@
-flask
-line-bot-sdk
-gspread
-google-auth
-google-auth-oauthlib
-requests
-apscheduler
-pytz
+flask>=3.0.0
+line-bot-sdk>=3.17.0
+gspread>=6.0.0
+google-auth>=2.0.0
+google-auth-oauthlib>=1.0.0
+requests>=2.25.0
+apscheduler>=3.10.0
+pytz>=2023.0
