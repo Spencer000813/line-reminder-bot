@@ -9,9 +9,18 @@ from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+# 更新為 LINE Bot SDK v3
+from linebot.v3 import WebhookHandler
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.messaging import (
+    Configuration,
+    ApiClient,
+    MessagingApi,
+    ReplyMessageRequest,
+    PushMessageRequest,
+    TextMessage
+)
 
 # 初始化 Flask 與 APScheduler
 app = Flask(__name__)
@@ -21,7 +30,9 @@ scheduler.start()
 # LINE 機器人驗證資訊
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+
+# 使用 v3 API 初始化
+configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Google Sheets 授權
@@ -294,7 +305,14 @@ def send_morning_message():
     try:
         if TARGET_GROUP_ID != "C4e138aa0eb252daa89846daab0102e41":
             message = "🌅 早安！新的一天開始了 ✨\n\n願你今天充滿活力與美好！"
-            line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.push_message(
+                    PushMessageRequest(
+                        to=TARGET_GROUP_ID,
+                        messages=[TextMessage(text=message)]
+                    )
+                )
             print(f"✅ 早安訊息已發送到群組: {TARGET_GROUP_ID}")
         else:
             print("⚠️ 推播群組 ID 尚未設定")
@@ -304,7 +322,14 @@ def send_morning_message():
 # 延遲後推播倒數訊息
 def send_countdown_reminder(user_id, minutes):
     try:
-        line_bot_api.push_message(user_id, TextSendMessage(text=f"⏰ 時間到！{minutes}分鐘倒數計時結束"))
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message(
+                PushMessageRequest(
+                    to=user_id,
+                    messages=[TextMessage(text=f"⏰ 時間到！{minutes}分鐘倒數計時結束")]
+                )
+            )
         print(f"✅ {minutes}分鐘倒數提醒已發送給：{user_id}")
     except Exception as e:
         print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
@@ -453,7 +478,14 @@ def weekly_summary():
             message += "\n💡 記得提前準備，祝您一週順利！"
         
         try:
-            line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.push_message(
+                    PushMessageRequest(
+                        to=TARGET_GROUP_ID,
+                        messages=[TextMessage(text=message)]
+                    )
+                )
             print(f"✅ 已發送週報摘要到群組：{TARGET_GROUP_ID}")
         except Exception as e:
             print(f"❌ 推播週報到群組失敗：{e}")
@@ -521,20 +553,4 @@ def is_schedule_format(text):
                         colon_index = time_part.find(":")
                         if colon_index > 0:
                             # 提取時間部分（HH:MM）
-                            time_only = time_part[:colon_index+3]  # 包含HH:MM
-                            if len(time_only) >= 4:  # 至少要有H:MM或HH:M
-                                time_segments = time_only.split(":")
-                                if len(time_segments) == 2:
-                                    if all(segment.isdigit() for segment in time_segments):
-                                        return True
-    except:
-        pass
-    
-    return False
-
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_text = event.message.text.strip()
-    lower_text = user_text.lower()
-    user_id = getattr(event.source, "group_id", None) or event.source.user_id
-    reply = None  # 預設不回應
+                            time
