@@ -24,8 +24,12 @@ from linebot.v3.messaging import (
 
 # 初始化 Flask 與 APScheduler
 app = Flask(__name__)
-scheduler = BackgroundScheduler()
+
+# 確保調度器配置正確
+scheduler = BackgroundScheduler(timezone='Asia/Taipei')
 scheduler.start()
+
+print("🔧 APScheduler 已啟動")
 
 # LINE 機器人驗證資訊
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -321,18 +325,25 @@ def send_morning_message():
 
 # 延遲後推播倒數訊息
 def send_countdown_reminder(user_id, minutes):
+    """發送倒數計時結束提醒"""
     try:
+        message = f"⏰ 時間到！{minutes}分鐘倒數計時結束 🔔\n\n時間過得真快呢！"
+        
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.push_message(
                 PushMessageRequest(
                     to=user_id,
-                    messages=[TextMessage(text=f"⏰ 時間到！{minutes}分鐘倒數計時結束")]
+                    messages=[TextMessage(text=message)]
                 )
             )
         print(f"✅ {minutes}分鐘倒數提醒已發送給：{user_id}")
+        
     except Exception as e:
         print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
+        # 如果推播失敗，記錄詳細錯誤
+        import traceback
+        print(f"詳細錯誤：{traceback.format_exc()}")
 
 # 美化的功能說明 (已更新包含風雲榜)
 def send_help_message():
@@ -585,12 +596,22 @@ def handle_message(event):
         elif command in ["countdown_3", "countdown_5"]:
             minutes = int(command.split("_")[1])
             reply = f"⏰ 開始 {minutes} 分鐘倒數計時！\n時間到我會通知你 🔔"
-            scheduler.add_job(
-                send_countdown_reminder,
-                'date',
-                run_date=datetime.now() + timedelta(minutes=minutes),
-                args=[user_id, minutes]
-            )
+            
+            # 生成唯一的 job ID
+            job_id = f"countdown_{user_id}_{datetime.now().timestamp()}"
+            
+            try:
+                scheduler.add_job(
+                    send_countdown_reminder,
+                    'date',
+                    run_date=datetime.now() + timedelta(minutes=minutes),
+                    args=[user_id, minutes],
+                    id=job_id
+                )
+                print(f"✅ 倒數計時任務已設定：{minutes}分鐘，Job ID: {job_id}")
+            except Exception as e:
+                print(f"❌ 設定倒數計時失敗：{e}")
+                reply += f"\n⚠️ 提醒設定可能失敗，請重試"
         elif command == "hello":
             reply = "哈囉！👋 我是你的行程助理！\n\n輸入「功能說明」查看我能做什麼 😊"
         elif command == "hi":
@@ -615,8 +636,14 @@ def handle_message(event):
         reply = f"🆔 您的ID資訊：\n{user_id}"
     elif "查看排程" in user_text:
         jobs = scheduler.get_jobs()
-        job_info = "\n".join([f"• {job.id}: {job.next_run_time}" for job in jobs])
-        reply = f"⚙️ 系統排程狀態：\n{job_info if job_info else '無排程任務'}"
+        if jobs:
+            job_info = []
+            for job in jobs:
+                next_run = job.next_run_time.strftime('%Y-%m-%d %H:%M:%S') if job.next_run_time else 'None'
+                job_info.append(f"• {job.id}: {next_run}")
+            reply = f"⚙️ 系統排程狀態：\n" + "\n".join(job_info)
+        else:
+            reply = "⚙️ 系統排程狀態：\n目前沒有排程任務"
     
     # 檢查是否為行程格式
     elif is_schedule_format(user_text):
