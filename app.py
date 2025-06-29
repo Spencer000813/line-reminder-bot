@@ -553,4 +553,284 @@ def is_schedule_format(text):
                         colon_index = time_part.find(":")
                         if colon_index > 0:
                             # 提取時間部分（HH:MM）
-                            time
+                            time_only = time_part[:colon_index+3]  # 包含HH:MM
+                            if len(time_only) >= 4:  # 至少要有H:MM或HH:M
+                                time_segments = time_only.split(":")
+                                if len(time_segments) == 2:
+                                    if all(segment.isdigit() for segment in time_segments):
+                                        return True
+    except:
+        pass
+    
+    return False
+
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_message(event):
+    user_text = event.message.text.strip()
+    lower_text = user_text.lower()
+    user_id = getattr(event.source, "group_id", None) or event.source.user_id
+    reply = None  # 預設不回應
+    
+    # 檢查風雲榜功能
+    ranking_reply = process_ranking_input(user_id, user_text)
+    if ranking_reply:
+        reply = ranking_reply
+    
+    # 檢查是否為確切匹配的指令
+    elif user_text in EXACT_MATCHES:
+        command = EXACT_MATCHES[user_text]
+        
+        if command in ["today", "tomorrow", "this_week", "next_week", "this_month", "next_month", "next_year"]:
+            reply = get_schedule_by_period(user_id, command)
+        elif command in ["countdown_3", "countdown_5"]:
+            minutes = int(command.split("_")[1])
+            reply = f"⏰ 開始 {minutes} 分鐘倒數計時！\n時間到我會通知你 🔔"
+            scheduler.add_job(
+                send_countdown_reminder,
+                'date',
+                run_date=datetime.now() + timedelta(minutes=minutes),
+                args=[user_id, minutes]
+            )
+        elif command == "hello":
+            reply = "哈囉！👋 我是你的行程助理！\n\n輸入「功能說明」查看我能做什麼 😊"
+        elif command == "hi":
+            reply = "Hi there! 🌟\n\n我是LINE行程助理，隨時為您服務！\n輸入「help」看看我的功能吧 ✨"
+        elif command == "what_else":
+            reply = "我還會很多呢！ 😄\n\n📅 管理你的行程\n⏰ 設定提醒通知\n📊 處理風雲榜資料\n🌅 每日早安問候\n📈 週報推播\n\n還想知道更多嗎？輸入「功能說明」吧！"
+    
+    # 檢查其他指令
+    elif any(keyword in lower_text for keyword in ["功能說明", "說明", "help"]):
+        reply = send_help_message()
+    elif "設定早安群組" in user_text:
+        reply = handle_set_morning_group(user_id, user_text)
+    elif "查看群組設定" in user_text:
+        reply = f"📊 目前設定：\n群組ID: {TARGET_GROUP_ID}\n\n💡 如需修改，請使用「設定早安群組」指令"
+    elif "測試早安" in user_text:
+        send_morning_message()
+        reply = "🧪 測試早安訊息已發送！"
+    elif "測試週報" in user_text:
+        manual_weekly_summary()
+        reply = "📊 手動週報已執行！"
+    elif "查看id" in lower_text:
+        reply = f"🆔 您的ID資訊：\n{user_id}"
+    elif "查看排程" in user_text:
+        jobs = scheduler.get_jobs()
+        job_info = "\n".join([f"• {job.id}: {job.next_run_time}" for job in jobs])
+        reply = f"⚙️ 系統排程狀態：\n{job_info if job_info else '無排程任務'}"
+    
+    # 檢查是否為行程格式
+    elif is_schedule_format(user_text):
+        reply = add_schedule(user_id, user_text)
+    
+    # 如果有回應訊息，就發送
+    if reply:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=reply)]
+                )
+            )
+
+def handle_set_morning_group(user_id, text):
+    """處理設定早安群組"""
+    global TARGET_GROUP_ID
+    if user_id.startswith("C"):  # 群組ID以C開頭
+        TARGET_GROUP_ID = user_id
+        return "✅ 早安群組已設定成功！\n🌅 每天早上8:30會推播早安訊息"
+    else:
+        return "❌ 請在群組中使用此指令"
+
+def get_schedule_by_period(user_id, period):
+    """根據時間期間獲取行程"""
+    try:
+        all_rows = sheet.get_all_values()[1:]
+        now = datetime.now()
+        
+        # 設定時間範圍
+        if period == "today":
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+            title = "📅 今日行程"
+        elif period == "tomorrow":
+            tomorrow = now + timedelta(days=1)
+            start = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = tomorrow.replace(hour=23, minute=59, second=59, microsecond=999999)
+            title = "📅 明日行程"
+        elif period == "this_week":
+            start = now - timedelta(days=now.weekday())
+            start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=6, hours=23, minutes=59, seconds=59, microseconds=999999)
+            title = "📅 本週行程"
+        elif period == "next_week":
+            days_until_next_monday = (7 - now.weekday()) % 7
+            if days_until_next_monday == 0:
+                days_until_next_monday = 7
+            start = now + timedelta(days=days_until_next_monday)
+            start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=6, hours=23, minutes=59, seconds=59, microseconds=999999)
+            title = "📅 下週行程"
+        elif period == "this_month":
+            start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if now.month == 12:
+                end = datetime(now.year + 1, 1, 1) - timedelta(microseconds=1)
+            else:
+                end = datetime(now.year, now.month + 1, 1) - timedelta(microseconds=1)
+            title = "📅 本月行程"
+        elif period == "next_month":
+            if now.month == 12:
+                start = datetime(now.year + 1, 1, 1)
+                end = datetime(now.year + 1, 2, 1) - timedelta(microseconds=1)
+            else:
+                start = datetime(now.year, now.month + 1, 1)
+                if now.month == 11:
+                    end = datetime(now.year + 1, 1, 1) - timedelta(microseconds=1)
+                else:
+                    end = datetime(now.year, now.month + 2, 1) - timedelta(microseconds=1)
+            title = "📅 下個月行程"
+        elif period == "next_year":
+            start = datetime(now.year + 1, 1, 1)
+            end = datetime(now.year + 2, 1, 1) - timedelta(microseconds=1)
+            title = "📅 明年行程"
+        
+        # 查詢行程
+        schedules = []
+        for row in all_rows:
+            if len(row) < 5:
+                continue
+            try:
+                date_str, time_str, content, row_user_id, _ = row
+                if row_user_id == user_id:
+                    dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
+                    if start <= dt <= end:
+                        schedules.append((dt, content))
+            except:
+                continue
+        
+        # 格式化回應
+        if not schedules:
+            return f"{title}\n━━━━━━━━━━━━━━━━\n\n🎉 這段時間沒有安排行程\n✨ 可以好好放鬆一下！"
+        
+        schedules.sort()
+        message = f"{title}\n━━━━━━━━━━━━━━━━\n\n"
+        
+        current_date = None
+        for dt, content in schedules:
+            if current_date != dt.date():
+                current_date = dt.date()
+                weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
+                weekday = weekday_names[dt.weekday()]
+                message += f"\n📆 {dt.strftime('%m/%d')} (週{weekday})\n"
+                message += "─────────────────────\n"
+            message += f"🕐 {dt.strftime('%H:%M')} │ {content}\n"
+        
+        return message
+        
+    except Exception as e:
+        print(f"❌ 查詢行程失敗：{e}")
+        return "❌ 查詢行程時發生錯誤"
+
+def add_schedule(user_id, text):
+    """新增行程"""
+    try:
+        parts = text.strip().split()
+        if len(parts) < 3:
+            return "❌ 行程格式錯誤\n請使用：月/日 時:分 行程內容"
+        
+        date_part = parts[0]
+        time_part = parts[1]
+        content = " ".join(parts[2:])
+        
+        # 解析日期
+        if "/" in date_part:
+            date_segments = date_part.split("/")
+            if len(date_segments) == 2:
+                month, day = map(int, date_segments)
+                year = datetime.now().year
+            elif len(date_segments) == 3:
+                year, month, day = map(int, date_segments)
+            else:
+                return "❌ 日期格式錯誤"
+        else:
+            return "❌ 日期格式錯誤"
+        
+        # 解析時間
+        if ":" in time_part:
+            time_segments = time_part.split(":")
+            if len(time_segments) == 2:
+                hour, minute = map(int, time_segments)
+            else:
+                return "❌ 時間格式錯誤"
+        else:
+            return "❌ 時間格式錯誤"
+        
+        # 建立 datetime 物件
+        schedule_time = datetime(year, month, day, hour, minute)
+        
+        # 檢查是否為過去時間
+        if schedule_time < datetime.now():
+            return "❌ 不能設定過去的時間"
+        
+        # 寫入 Google Sheets
+        date_str = schedule_time.strftime("%Y/%m/%d")
+        time_str = schedule_time.strftime("%H:%M")
+        
+        sheet.append_row([date_str, time_str, content, user_id, "pending"])
+        
+        # 設定提醒（行程前一小時）
+        reminder_time = schedule_time - timedelta(hours=1)
+        if reminder_time > datetime.now():
+            scheduler.add_job(
+                send_schedule_reminder,
+                'date',
+                run_date=reminder_time,
+                args=[user_id, content, schedule_time],
+                id=f"remind_{user_id}_{schedule_time.timestamp()}"
+            )
+        
+        return (
+            f"✅ 行程新增成功！\n\n"
+            f"📅 日期：{schedule_time.strftime('%Y/%m/%d')}\n"
+            f"🕐 時間：{schedule_time.strftime('%H:%M')}\n"
+            f"📝 內容：{content}\n\n"
+            f"⏰ 將在行程前一小時提醒您"
+        )
+        
+    except ValueError:
+        return "❌ 日期或時間格式錯誤"
+    except Exception as e:
+        print(f"❌ 新增行程失敗：{e}")
+        return "❌ 新增行程時發生錯誤"
+
+def send_schedule_reminder(user_id, content, schedule_time):
+    """發送行程提醒"""
+    try:
+        message = f"⏰ 行程提醒\n\n📅 {schedule_time.strftime('%m/%d %H:%M')}\n📝 {content}\n\n還有一小時就要開始囉！"
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message(
+                PushMessageRequest(
+                    to=user_id,
+                    messages=[TextMessage(text=message)]
+                )
+            )
+        print(f"✅ 行程提醒已發送：{content}")
+    except Exception as e:
+        print(f"❌ 發送行程提醒失敗：{e}")
+
+if __name__ == "__main__":
+    # 修復端口綁定問題 - 這是關鍵修復
+    port = int(os.environ.get('PORT', 5000))
+    host = '0.0.0.0'  # 重要：必須綁定到 0.0.0.0 而不是 localhost
+    
+    print(f"🚀 LINE Reminder Bot 正在啟動...")
+    print(f"📡 監聽地址：{host}:{port}")
+    
+    # 啟動 Flask 應用
+    app.run(
+        host=host,
+        port=port,
+        debug=False,  # 生產環境設為 False
+        threaded=True  # 啟用多線程支援
+    )
