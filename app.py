@@ -1,6 +1,5 @@
 import os
 import json
-import time
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 
@@ -10,30 +9,19 @@ from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# 使用新版 LINE Bot SDK v3
-from linebot.v3 import WebhookHandler
-from linebot.v3.messaging import (
-    ApiClient, MessagingApi, Configuration, 
-    TextMessage, ReplyMessageRequest, PushMessageRequest
-)
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.webhooks import (
-    MessageEvent, TextMessageContent
-)
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 # 初始化 Flask 與 APScheduler
 app = Flask(__name__)
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-# LINE 機器人驗證資訊 - 使用新版 API
+# LINE 機器人驗證資訊
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-
-# 初始化新版 LINE Bot API
-configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
-api_client = ApiClient(configuration)
-line_bot_api = MessagingApi(api_client)
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Google Sheets 授權
@@ -236,78 +224,96 @@ def write_ranking_to_sheet_batch(user_id, data_batch):
         print(f"❌ 寫入工作表2失敗：{e}")
         return f"❌ 寫入工作表2失敗：{str(e)}\n請檢查工作表權限或重試"
 
-# 發送早安訊息 - 使用新版 API
+def write_ranking_to_sheet(user_id, user_session):
+    """將風雲榜資料寫入Google Sheets工作表2"""
+    try:
+        worksheet = get_worksheet2()
+        if not worksheet:
+            return "❌ 無法連接到工作表2"
+        
+        # 解析同學姓名（可能有多個，用逗號分隔，支援全形和半形逗號）
+        student_names_str = user_session["data"][0]
+        # 先將全形逗號轉換為半形逗號，然後分割
+        student_names_str = student_names_str.replace('，', ',')  # 全形逗號轉半形
+        student_names = [name.strip() for name in student_names_str.split(",") if name.strip()]
+        
+        if not student_names:
+            return "❌ 沒有找到有效的同學姓名"
+        
+        # 準備其他共用的資料 (B到J欄，除了A欄姓名)
+        common_data = [
+            user_session["data"][1],  # B欄：實驗三或傳心練習
+            user_session["data"][2],  # C欄：練習日期
+            "",                       # D欄：空白
+            user_session["data"][4],  # E欄：階段
+            user_session["data"][5],  # F欄：喜歡吃
+            user_session["data"][6],  # G欄：不喜歡吃
+            user_session["data"][7],  # H欄：喜歡做的事
+            user_session["data"][8],  # I欄：不喜歡做的事
+            user_session["data"][9]   # J欄：小老師
+        ]
+        
+        # 為每個同學姓名創建一行資料
+        rows_to_add = []
+        for student_name in student_names:
+            row_data = [student_name] + common_data  # A欄放單個姓名，B~J欄放共用資料
+            rows_to_add.append(row_data)
+        
+        # 批量寫入多行資料
+        worksheet.append_rows(rows_to_add)
+        
+        # 清理使用者的輸入狀態
+        del ranking_data[user_id]
+        
+        # 格式化成功訊息
+        success_message = (
+            f"🎉 風雲榜資料已成功寫入工作表2！\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📊 已記錄 {len(student_names)} 位同學的資料：\n\n"
+            f"👥 同學姓名：{', '.join(student_names)}\n"
+            f"📚 實驗三或傳心練習：{common_data[0]}\n"
+            f"📅 練習日期：{common_data[1]}\n"
+            f"🎯 階段：{common_data[3]}\n"
+            f"🍎 喜歡吃：{common_data[4]}\n"
+            f"🚫 不喜歡吃：{common_data[5]}\n"
+            f"❤️ 喜歡做的事：{common_data[6]}\n"
+            f"💔 不喜歡做的事：{common_data[7]}\n"
+            f"👨‍🏫 小老師：{common_data[8]}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"✅ 總共新增了 {len(student_names)} 行資料到Google Sheets\n"
+            f"📋 每位同學都有獨立的一行記錄"
+        )
+        
+        return success_message
+        
+    except Exception as e:
+        print(f"❌ 寫入工作表2失敗：{e}")
+        # 清理使用者的輸入狀態
+        if user_id in ranking_data:
+            del ranking_data[user_id]
+        return f"❌ 寫入工作表2失敗：{str(e)}\n請檢查工作表權限或重試"
+
+# 發送早安訊息
 def send_morning_message():
     try:
         if TARGET_GROUP_ID != "C4e138aa0eb252daa89846daab0102e41":
             message = "🌅 早安！新的一天開始了 ✨\n\n願你今天充滿活力與美好！"
-            push_request = PushMessageRequest(
-                to=TARGET_GROUP_ID,
-                messages=[TextMessage(text=message)]
-            )
-            line_bot_api.push_message(push_request)
+            line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
             print(f"✅ 早安訊息已發送到群組: {TARGET_GROUP_ID}")
         else:
             print("⚠️ 推播群組 ID 尚未設定")
     except Exception as e:
         print(f"❌ 發送早安訊息失敗：{e}")
 
-# 延遲後推播倒數訊息 - 使用新版 API 並加強除錯
+# 延遲後推播倒數訊息
 def send_countdown_reminder(user_id, minutes):
-    """發送倒數計時結束通知"""
     try:
-        print(f"🔄 準備發送倒數計時通知...")
-        print(f"   📱 用戶ID: {user_id}")
-        print(f"   ⏰ 倒數時間: {minutes}分鐘")
-        print(f"   🕐 當前時間: {datetime.now()}")
-        
-        # 檢查 ACCESS_TOKEN 是否存在
-        if not LINE_CHANNEL_ACCESS_TOKEN:
-            print("❌ LINE_CHANNEL_ACCESS_TOKEN 未設定")
-            return
-            
-        if not user_id:
-            print("❌ user_id 為空")
-            return
-            
-        message_text = f"⏰ 時間到！{minutes}分鐘倒數計時結束"
-        print(f"   📝 訊息內容: {message_text}")
-        
-        # 使用新版 v3 API
-        push_request = PushMessageRequest(
-            to=user_id,
-            messages=[TextMessage(text=message_text)]
-        )
-        line_bot_api.push_message(push_request)
-        print(f"✅ 倒數計時通知已發送給用戶: {user_id}")
-        
-        # 額外發送測試訊息確認推送功能
-        test_message = "🧪 測試推送成功！倒數計時功能正常運作"
-        test_request = PushMessageRequest(
-            to=user_id,
-            messages=[TextMessage(text=test_message)]
-        )
-        line_bot_api.push_message(test_request)
-        print(f"✅ 測試訊息已發送")
-        
+        line_bot_api.push_message(user_id, TextSendMessage(text=f"⏰ 時間到！{minutes}分鐘倒數計時結束"))
+        print(f"✅ {minutes}分鐘倒數提醒已發送給：{user_id}")
     except Exception as e:
-        print(f"❌ 發送倒數計時通知失敗: {e}")
-        print(f"   錯誤類型: {type(e).__name__}")
-        print(f"   錯誤詳情: {str(e)}")
-        
-        # 嘗試備用方案：發送錯誤通知
-        try:
-            error_message = f"❌ 倒數計時功能發生錯誤: {str(e)}"
-            error_request = PushMessageRequest(
-                to=user_id,
-                messages=[TextMessage(text=error_message)]
-            )
-            line_bot_api.push_message(error_request)
-            print("✅ 錯誤通知已發送")
-        except Exception as backup_error:
-            print(f"❌ 連備用錯誤通知也發送失敗: {backup_error}")
+        print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
 
-# 美化的功能說明 (已更新包含風雲榜)
+# 美化的功能說明 (已更新包含風雲榜和1分鐘倒數)
 def send_help_message():
     return (
         "🤖 LINE 行程助理 - 完整功能指南\n"
@@ -325,8 +331,18 @@ def send_help_message():
         "   10\n"
         "   10\n"
         "   10\n"
-        "   嘉憶家的莎莉\n"
-        "💡 同學姓名用逗號分隔 (支援 , 或 ，)，系統會自動建立多筆記錄\n"
+        "   嘉憶家的莎莉\n\n"
+        "📋 資料項目說明：\n"
+        "   1️⃣ 同學姓名 (用逗號分隔，支援 , 或 ，)\n"
+        "   2️⃣ 實驗三或傳心練習\n"
+        "   3️⃣ 練習日期\n"
+        "   4️⃣ 階段\n"
+        "   5️⃣ 喜歡吃 (分數)\n"
+        "   6️⃣ 不喜歡吃 (分數)\n"
+        "   7️⃣ 喜歡做的事 (分數)\n"
+        "   8️⃣ 不喜歡做的事 (分數)\n"
+        "   9️⃣ 小老師\n\n"
+        "💡 同學姓名用逗號分隔，系統會自動為每位同學建立獨立記錄\n"
         "✅ 資料將自動寫入Google工作表2\n\n"
         "📅 行程管理功能\n"
         "═══════════════\n"
@@ -349,8 +365,7 @@ def send_help_message():
         "🕐 倒數計時功能：\n"
         "   • 倒數1分鐘\n"
         "   • 倒數3分鐘 / 倒數計時 / 開始倒數\n"
-        "   • 倒數5分鐘\n"
-        "   • 測試推送 - 測試推送功能\n\n"
+        "   • 倒數5分鐘\n\n"
         "💬 趣味互動：\n"
         "   • 哈囉 / hi - 打個招呼\n"
         "   • 你還會說什麼? - 驚喜回應\n\n"
@@ -372,7 +387,7 @@ def send_help_message():
         "💡 小提醒：系統會在行程前一小時自動提醒您！"
     )
 
-# 美化的週報推播 - 使用新版 API
+# 美化的週報推播
 def weekly_summary():
     print("🔄 開始執行每週行程摘要...")
     try:
@@ -453,11 +468,7 @@ def weekly_summary():
             message += "\n💡 記得提前準備，祝您一週順利！"
         
         try:
-            push_request = PushMessageRequest(
-                to=TARGET_GROUP_ID,
-                messages=[TextMessage(text=message)]
-            )
-            line_bot_api.push_message(push_request)
+            line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
             print(f"✅ 已發送週報摘要到群組：{TARGET_GROUP_ID}")
         except Exception as e:
             print(f"❌ 推播週報到群組失敗：{e}")
@@ -484,7 +495,7 @@ scheduler.add_job(
     id="morning_message"
 )
 
-# 指令對應表 - 修正：添加倒數1分鐘的對應關係和測試推送
+# 指令對應表（新增倒數1分鐘）
 EXACT_MATCHES = {
     "今日行程": "today",
     "明日行程": "tomorrow",
@@ -498,7 +509,6 @@ EXACT_MATCHES = {
     "倒數1分鐘": "countdown_1",
     "倒數3分鐘": "countdown_3",
     "倒數5分鐘": "countdown_5",
-    "測試推送": "test_push",  # 新增測試推送功能
     "哈囉": "hello",
     "hi": "hi",
     "你還會說什麼?": "what_else"
@@ -538,7 +548,7 @@ def is_schedule_format(text):
     
     return False
 
-@handler.add(MessageEvent, message=TextMessageContent)
+@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text.strip()
     lower_text = user_text.lower()
@@ -549,11 +559,7 @@ def handle_message(event):
     if user_text == "風雲榜" or (user_text.count('\n') >= 8 and len(user_text.strip().split('\n')) >= 9):
         reply = process_ranking_input(user_id, user_text)
         if reply:
-            reply_request = ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply)]
-            )
-            line_bot_api.reply_message(reply_request)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
 
     # 群組管理指令
@@ -642,101 +648,48 @@ def handle_message(event):
             reply = "👋 呷飽沒？需要安排什麼行程嗎？"
         elif reply_type == "what_else":
             reply = "💕 我愛你 ❤️\n\n還有很多功能等你發現喔！\n輸入「功能說明」查看完整指令列表～"
-        elif reply_type == "test_push":
-            # 新增測試推送功能
-            reply = (
-                "🧪 測試推送功能啟動！\n"
-                "━━━━━━━━━━━━━━━━\n"
-                "📱 正在發送測試訊息...\n"
-                "⏱️ 請稍等幾秒鐘查看是否收到推送"
-            )
-            # 立即發送測試推送
-            try:
-                test_message = (
-                    "✅ 推送測試成功！\n"
-                    "━━━━━━━━━━━━━━━━\n"
-                    f"🕐 發送時間：{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}\n"
-                    f"📱 用戶ID：{user_id}\n"
-                    "🎉 LINE Bot 推送功能運作正常！"
-                )
-                push_request = PushMessageRequest(
-                    to=user_id,
-                    messages=[TextMessage(text=test_message)]
-                )
-                line_bot_api.push_message(push_request)
-                print(f"✅ 測試推送已發送給：{user_id}")
-            except Exception as e:
-                print(f"❌ 測試推送失敗：{e}")
         elif reply_type == "countdown_1":
             reply = (
                 "⏰ 1分鐘倒數計時開始！\n"
                 "━━━━━━━━━━━━━━━━\n"
                 "🕐 計時器已啟動\n"
-                "📢 1分鐘後我會提醒您時間到了\n"
-                f"🎯 結束時間：{(datetime.now() + timedelta(minutes=1)).strftime('%H:%M:%S')}"
+                "📢 1分鐘後我會提醒您時間到了"
             )
-            # 使用更精確的排程設定
-            end_time = datetime.now() + timedelta(minutes=1)
-            job_id = f"countdown_1_{user_id}_{int(time.time())}"
-            try:
-                scheduler.add_job(
-                    send_countdown_reminder,
-                    trigger="date",
-                    run_date=end_time,
-                    args=[user_id, 1],
-                    id=job_id,
-                    misfire_grace_time=30  # 允許30秒的延遲容忍
-                )
-                print(f"✅ 倒數計時排程已設定：{job_id}，結束時間：{end_time}")
-            except Exception as e:
-                print(f"❌ 設定倒數計時排程失敗：{e}")
-                reply += f"\n⚠️ 排程設定失敗：{str(e)}"
+            scheduler.add_job(
+                send_countdown_reminder,
+                trigger="date",
+                run_date=datetime.now() + timedelta(minutes=1),
+                args=[user_id, 1],
+                id=f"countdown_1_{user_id}_{datetime.now().timestamp()}"
+            )
         elif reply_type == "countdown_3":
             reply = (
                 "⏰ 3分鐘倒數計時開始！\n"
                 "━━━━━━━━━━━━━━━━\n"
                 "🕐 計時器已啟動\n"
-                "📢 3分鐘後我會提醒您時間到了\n"
-                f"🎯 結束時間：{(datetime.now() + timedelta(minutes=3)).strftime('%H:%M:%S')}"
+                "📢 3分鐘後我會提醒您時間到了"
             )
-            end_time = datetime.now() + timedelta(minutes=3)
-            job_id = f"countdown_3_{user_id}_{int(time.time())}"
-            try:
-                scheduler.add_job(
-                    send_countdown_reminder,
-                    trigger="date",
-                    run_date=end_time,
-                    args=[user_id, 3],
-                    id=job_id,
-                    misfire_grace_time=30
-                )
-                print(f"✅ 倒數計時排程已設定：{job_id}，結束時間：{end_time}")
-            except Exception as e:
-                print(f"❌ 設定倒數計時排程失敗：{e}")
-                reply += f"\n⚠️ 排程設定失敗：{str(e)}"
+            scheduler.add_job(
+                send_countdown_reminder,
+                trigger="date",
+                run_date=datetime.now() + timedelta(minutes=3),
+                args=[user_id, 3],
+                id=f"countdown_3_{user_id}_{datetime.now().timestamp()}"
+            )
         elif reply_type == "countdown_5":
             reply = (
                 "⏰ 5分鐘倒數計時開始！\n"
                 "━━━━━━━━━━━━━━━━\n"
                 "🕐 計時器已啟動\n"
-                "📢 5分鐘後我會提醒您時間到了\n"
-                f"🎯 結束時間：{(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}"
+                "📢 5分鐘後我會提醒您時間到了"
             )
-            end_time = datetime.now() + timedelta(minutes=5)
-            job_id = f"countdown_5_{user_id}_{int(time.time())}"
-            try:
-                scheduler.add_job(
-                    send_countdown_reminder,
-                    trigger="date",
-                    run_date=end_time,
-                    args=[user_id, 5],
-                    id=job_id,
-                    misfire_grace_time=30
-                )
-                print(f"✅ 倒數計時排程已設定：{job_id}，結束時間：{end_time}")
-            except Exception as e:
-                print(f"❌ 設定倒數計時排程失敗：{e}")
-                reply += f"\n⚠️ 排程設定失敗：{str(e)}"
+            scheduler.add_job(
+                send_countdown_reminder,
+                trigger="date",
+                run_date=datetime.now() + timedelta(minutes=5),
+                args=[user_id, 5],
+                id=f"countdown_5_{user_id}_{datetime.now().timestamp()}"
+            )
         elif reply_type:
             reply = get_schedule(reply_type, user_id)
         else:
@@ -747,8 +700,233 @@ def handle_message(event):
 
     # 只有在 reply 不為 None 時才回應
     if reply:
-        reply_request = ReplyMessageRequest(
-            reply_token=event.reply_token,
-            messages=[TextMessage(text=reply)]
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+def get_schedule(period, user_id):
+    try:
+        all_rows = sheet.get_all_values()[1:]
+        now = datetime.now()
+        schedules = []
+
+        # 定義期間名稱和表情符號
+        period_info = {
+            "today": {"name": "今日行程", "emoji": "📅", "empty_msg": "今天沒有安排任何行程，可以放鬆一下！"},
+            "tomorrow": {"name": "明日行程", "emoji": "📋", "empty_msg": "明天目前沒有安排，有個輕鬆的一天！"},
+            "this_week": {"name": "本週行程", "emoji": "📊", "empty_msg": "本週沒有特別安排，享受自由的時光！"},
+            "next_week": {"name": "下週行程", "emoji": "🗓️", "empty_msg": "下週暫時沒有安排，可以開始規劃了！"},
+            "this_month": {"name": "本月行程", "emoji": "📆", "empty_msg": "本月份目前沒有特別安排！"},
+            "next_month": {"name": "下個月行程", "emoji": "🗂️", "empty_msg": "下個月還沒有安排，提前規劃很棒！"},
+            "next_year": {"name": "明年行程", "emoji": "🎯", "empty_msg": "明年的規劃還是空白，充滿無限可能！"}
+        }
+
+        for row in all_rows:
+            if len(row) < 5:
+                continue
+            try:
+                date_str, time_str, content, uid, _ = row
+                dt = datetime.strptime(f"{date_str.strip()} {time_str.strip()}", "%Y/%m/%d %H:%M")
+            except Exception as e:
+                print(f"❌ 解析時間失敗：{e}")
+                continue
+
+            if user_id.lower() != uid.lower():
+                continue
+
+            if (
+                (period == "today" and dt.date() == now.date()) or
+                (period == "tomorrow" and dt.date() == (now + timedelta(days=1)).date()) or
+                (period == "this_week" and dt.isocalendar()[1] == now.isocalendar()[1] and dt.year == now.year) or
+                (period == "next_week" and dt.isocalendar()[1] == (now + timedelta(days=7)).isocalendar()[1] and dt.year == (now + timedelta(days=7)).year) or
+                (period == "this_month" and dt.year == now.year and dt.month == now.month) or
+                (period == "next_month" and (
+                    dt.year == (now.year + 1 if now.month == 12 else now.year)
+                ) and dt.month == ((now.month % 12) + 1)) or
+                (period == "next_year" and dt.year == now.year + 1)
+            ):
+                schedules.append((dt, content))
+
+        info = period_info.get(period, {"name": "行程", "emoji": "📅", "empty_msg": "目前沒有相關行程"})
+        
+        if not schedules:
+            return (
+                f"{info['emoji']} {info['name']}\n"
+                f"━━━━━━━━━━━━━━━━\n\n"
+                f"🎉 {info['empty_msg']}"
+            )
+
+        # 按時間排序
+        schedules.sort()
+        
+        # 格式化輸出
+        result = (
+            f"{info['emoji']} {info['name']}\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
         )
-        line_bot_api.reply_message(reply_request)
+        
+        current_date = None
+        weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
+        
+        for dt, content in schedules:
+            # 如果是新的日期，加上日期標題
+            if current_date != dt.date():
+                current_date = dt.date()
+                if len(schedules) > 1 and period in ["this_week", "next_week", "this_month", "next_month", "next_year"]:
+                    weekday = weekday_names[dt.weekday()]
+                    result += f"📆 {dt.strftime('%m/%d')} (週{weekday})\n"
+                    result += "─────────────────────\n"
+            
+            # 顯示時間和內容
+            result += f"🕐 {dt.strftime('%H:%M')} │ {content}\n"
+            
+            # 在多日期顯示時添加空行
+            if len(schedules) > 1 and period in ["this_week", "next_week", "this_month", "next_month", "next_year"]:
+                # 檢查下一個行程是否是不同日期
+                current_index = schedules.index((dt, content))
+                if current_index < len(schedules) - 1:
+                    next_dt, _ = schedules[current_index + 1]
+                    if next_dt.date() != dt.date():
+                        result += "\n"
+
+        # 添加友善的結尾
+        if len(schedules) > 0:
+            result += "\n💡 記得提前準備，祝您順利完成所有安排！"
+
+        return result.rstrip()
+        
+    except Exception as e:
+        print(f"❌ 取得行程失敗：{e}")
+        return "❌ 取得行程時發生錯誤，請稍後再試。"
+
+def try_add_schedule(text, user_id):
+    try:
+        parts = text.strip().split()
+        if len(parts) >= 2:
+            date_part = parts[0]
+            time_and_content = " ".join(parts[1:])
+            
+            # 處理時間和內容可能沒有空格分隔的情況
+            time_part = None
+            content = None
+            
+            # 尋找時間格式 HH:MM
+            if ":" in time_and_content:
+                colon_index = time_and_content.find(":")
+                if colon_index >= 1:
+                    # 找到時間的開始位置
+                    time_start = max(0, colon_index - 2)
+                    while time_start < colon_index and not time_and_content[time_start].isdigit():
+                        time_start += 1
+                    
+                    # 找到時間的結束位置（冒號後2位數字）
+                    time_end = colon_index + 3
+                    if time_end <= len(time_and_content):
+                        potential_time = time_and_content[time_start:time_end]
+                        # 驗證時間格式
+                        if ":" in potential_time:
+                            time_segments = potential_time.split(":")
+                            if len(time_segments) == 2 and all(seg.isdigit() for seg in time_segments):
+                                time_part = potential_time
+                                content = time_and_content[time_end:].strip()
+                                
+                                # 如果沒有內容，可能是因為時間和內容之間沒有空格
+                                if not content:
+                                    content = time_and_content[time_end:].strip()
+            
+            # 如果無法解析時間，返回格式錯誤
+            if not time_part or not content:
+                return (
+                    "❌ 時間格式錯誤\n"
+                    "━━━━━━━━━━━━━━━━\n"
+                    "📝 正確格式：月/日 時:分 行程內容\n\n"
+                    "✅ 範例：\n"
+                    "   • 7/1 14:00 開會\n"
+                    "   • 12/25 09:30 聖誕聚餐"
+                )
+            
+            # 如果日期格式是 M/D，自動加上當前年份
+            if date_part.count("/") == 1:
+                date_part = f"{datetime.now().year}/{date_part}"
+            
+            dt = datetime.strptime(f"{date_part} {time_part}", "%Y/%m/%d %H:%M")
+            
+            # 檢查日期是否為過去時間
+            if dt < datetime.now():
+                return (
+                    "❌ 無法新增過去的時間\n"
+                    "━━━━━━━━━━━━━━━━\n"
+                    "⏰ 請確認日期和時間是否正確\n"
+                    "💡 只能安排未來的行程喔！"
+                )
+            
+            sheet.append_row([
+                dt.strftime("%Y/%m/%d"),
+                dt.strftime("%H:%M"),
+                content,
+                user_id,
+                ""
+            ])
+            
+            weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
+            weekday = weekday_names[dt.weekday()]
+            
+            return (
+                f"✅ 行程新增成功！\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"📅 日期：{dt.strftime('%Y/%m/%d')} (週{weekday})\n"
+                f"🕐 時間：{dt.strftime('%H:%M')}\n"
+                f"📝 內容：{content}\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"⏰ 系統會在一小時前自動提醒您！"
+            )
+    except ValueError as e:
+        print(f"❌ 時間格式錯誤：{e}")
+        return (
+            "❌ 時間格式解析失敗\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "📝 請使用正確格式：月/日 時:分 行程內容\n\n"
+            "✅ 範例：7/1 14:00 開會"
+        )
+    except Exception as e:
+        print(f"❌ 新增行程失敗：{e}")
+        return (
+            "❌ 新增行程失敗\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "🔧 系統發生錯誤，請稍後再試\n"
+            "💬 如持續發生問題，請聯絡管理員"
+        )
+    
+    return None
+
+if __name__ == "__main__":
+    print("🤖 LINE 行程助理啟動中...")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("📊 風雲榜功能：")
+    print("   🎯 輸入 '風雲榜' 開始資料輸入流程")
+    print("   📝 系統會引導您依序輸入9項資料")
+    print("   ✅ 資料將自動寫入指定的Google工作表2")
+    print("📅 自動排程服務：")
+    print("   🌅 每天早上 8:30 - 溫馨早安訊息")
+    print("   📊 每週日晚上 22:00 - 下週行程摘要")
+    print("⏰ 倒數計時功能：")
+    print("   🕐 倒數1分鐘：輸入 '倒數1分鐘'")
+    print("   🕐 倒數3分鐘：輸入 '倒數3分鐘' 或 '倒數計時' 或 '開始倒數'")
+    print("   🕐 倒數5分鐘：輸入 '倒數5分鐘'")
+    print("💡 輸入 '功能說明' 查看完整功能列表")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    
+    # 顯示目前排程狀態
+    try:
+        jobs = scheduler.get_jobs()
+        print(f"✅ 系統狀態：已載入 {len(jobs)} 個排程工作")
+        for job in jobs:
+            next_run = job.next_run_time.strftime('%Y/%m/%d %H:%M:%S') if job.next_run_time else "未設定"
+            job_name = "🌅 早安訊息" if job.id == "morning_message" else "📊 週報摘要" if job.id == "weekly_summary" else job.id
+            print(f"   • {job_name}: 下次執行 {next_run}")
+    except Exception as e:
+        print(f"❌ 查看排程狀態失敗：{e}")
+    
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("🚀 LINE Bot 已成功啟動，準備為您服務！")
+    
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
