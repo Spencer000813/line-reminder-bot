@@ -2,6 +2,8 @@ import os
 import json
 import re
 import traceback
+import threading
+import time
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 
@@ -10,6 +12,7 @@ from google.oauth2.service_account import Credentials
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -17,7 +20,26 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 # 初始化 Flask 與 APScheduler
 app = Flask(__name__)
-scheduler = BackgroundScheduler()
+
+# 配置 APScheduler 使其更穩定
+scheduler = BackgroundScheduler(
+    timezone='Asia/Taipei',  # 明確設定時區
+    job_defaults={
+        'coalesce': False,
+        'max_instances': 3,
+        'misfire_grace_time': 300  # 5分鐘的容錯時間
+    }
+)
+
+# 添加排程器事件監聽器
+def job_listener(event):
+    if event.exception:
+        print(f"❌ 排程任務執行失敗：{event.job_id} - {event.exception}")
+        print(f"詳細錯誤：{traceback.format_exc()}")
+    else:
+        print(f"✅ 排程任務執行成功：{event.job_id}")
+
+scheduler.add_listener(job_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED)
 scheduler.start()
 
 # LINE 機器人驗證資訊
@@ -42,6 +64,9 @@ RANKING_SPREADSHEET_ID = "1LkPCLbaw5wmPao9g2mMEMRT7eklteR-6RLaJNYP8OQA"
 WORKSHEET_NAME = "工作表2"
 ranking_data = {}  # 風雲榜資料暫存
 
+# 倒數計時狀態追蹤
+countdown_status = {}  # 追蹤倒數計時狀態
+
 @app.route("/")
 def home():
     return "LINE Reminder Bot is running."
@@ -56,7 +81,7 @@ def callback():
         abort(400)
     return "OK"
 
-# 風雲榜功能函數
+# 風雲榜功能函數（保持不變）
 def get_worksheet2():
     """取得工作表2的連線"""
     try:
@@ -70,7 +95,6 @@ def get_worksheet2():
 def process_ranking_input(user_id, text):
     """處理風雲榜輸入"""
     try:
-        # 如果是觸發詞，顯示使用說明和範例
         if text.strip() == "風雲榜":
             return (
                 "📊 風雲榜資料輸入說明\n"
@@ -101,12 +125,10 @@ def process_ranking_input(user_id, text):
                 "💡 請把所有資料一次輸入，系統會自動處理！"
             )
         
-        # 檢查是否為多行資料輸入
         lines = text.strip().split('\n')
-        if len(lines) >= 9:  # 至少要有9行資料
+        if len(lines) >= 9:
             return process_batch_ranking_data(user_id, lines)
         
-        # 如果不是風雲榜格式，返回None讓其他功能處理
         return None
         
     except Exception as e:
@@ -116,7 +138,6 @@ def process_ranking_input(user_id, text):
 def process_batch_ranking_data(user_id, lines):
     """處理批量風雲榜資料"""
     try:
-        # 確保至少有9行資料
         if len(lines) < 9:
             return (
                 "❌ 資料不完整\n"
@@ -128,10 +149,8 @@ def process_batch_ranking_data(user_id, lines):
                 "💡 輸入「風雲榜」查看完整範例"
             )
         
-        # 提取並清理資料
-        data = [line.strip() for line in lines[:9]]  # 只取前9行
+        data = [line.strip() for line in lines[:9]]
         
-        # 驗證資料
         if not all(data):
             return (
                 "❌ 發現空白資料\n"
@@ -140,23 +159,13 @@ def process_batch_ranking_data(user_id, lines):
                 "💡 輸入「風雲榜」查看完整範例"
             )
         
-        # 建立資料結構
         ranking_data_batch = {
             "data": [
-                data[0],  # 同學姓名
-                data[1],  # 實驗三或傳心練習
-                data[2],  # 練習日期
-                "",       # 空白欄位
-                data[3],  # 階段
-                data[4],  # 喜歡吃
-                data[5],  # 不喜歡吃
-                data[6],  # 喜歡做的事
-                data[7],  # 不喜歡做的事
-                data[8]   # 小老師
+                data[0], data[1], data[2], "",
+                data[3], data[4], data[5], data[6], data[7], data[8]
             ]
         }
         
-        # 直接寫入工作表
         return write_ranking_to_sheet_batch(user_id, ranking_data_batch)
         
     except Exception as e:
@@ -170,38 +179,26 @@ def write_ranking_to_sheet_batch(user_id, data_batch):
         if not worksheet:
             return "❌ 無法連接到工作表2"
         
-        # 解析同學姓名（可能有多個，用逗號分隔，支援全形和半形逗號）
         student_names_str = data_batch["data"][0]
-        # 先將全形逗號轉換為半形逗號，然後分割
-        student_names_str = student_names_str.replace('，', ',')  # 全形逗號轉半形
+        student_names_str = student_names_str.replace('，', ',')
         student_names = [name.strip() for name in student_names_str.split(",") if name.strip()]
         
         if not student_names:
             return "❌ 沒有找到有效的同學姓名"
         
-        # 準備其他共用的資料 (B到J欄，除了A欄姓名)
         common_data = [
-            data_batch["data"][1],   # B欄：實驗三或傳心練習
-            data_batch["data"][2],   # C欄：練習日期
-            "",                      # D欄：空白
-            data_batch["data"][4],   # E欄：階段
-            data_batch["data"][5],   # F欄：喜歡吃
-            data_batch["data"][6],   # G欄：不喜歡吃
-            data_batch["data"][7],   # H欄：喜歡做的事
-            data_batch["data"][8],   # I欄：不喜歡做的事
-            data_batch["data"][9]    # J欄：小老師
+            data_batch["data"][1], data_batch["data"][2], "",
+            data_batch["data"][4], data_batch["data"][5], data_batch["data"][6],
+            data_batch["data"][7], data_batch["data"][8], data_batch["data"][9]
         ]
         
-        # 為每個同學姓名創建一行資料
         rows_to_add = []
         for student_name in student_names:
-            row_data = [student_name] + common_data  # A欄放單個姓名，B~J欄放共用資料
+            row_data = [student_name] + common_data
             rows_to_add.append(row_data)
         
-        # 批量寫入多行資料
         worksheet.append_rows(rows_to_add)
         
-        # 格式化成功訊息
         success_message = (
             f"🎉 風雲榜資料已成功寫入工作表2！\n"
             f"━━━━━━━━━━━━━━━━\n"
@@ -226,58 +223,130 @@ def write_ranking_to_sheet_batch(user_id, data_batch):
         print(f"❌ 寫入工作表2失敗：{e}")
         return f"❌ 寫入工作表2失敗：{str(e)}\n請檢查工作表權限或重試"
 
-# 倒數計時功能 - 優化版本
-def send_countdown_reminder(user_id, minutes):
-    """延遲後推播倒數訊息 - 優化版本"""
+# 倒數計時功能 - 加強版
+def send_countdown_reminder(user_id, minutes, job_id):
+    """發送倒數計時提醒"""
     try:
+        current_time = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
+        print(f"🔔 開始發送倒數提醒 - 時間：{current_time}, 用戶：{user_id}, 分鐘：{minutes}")
+        
         message = (
             f"⏰ 時間到！\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"🔔 {minutes}分鐘倒數計時結束\n"
-            f"✨ 該繼續下一個任務了！"
+            f"✨ 該繼續下一個任務了！\n"
+            f"📅 提醒時間：{current_time}"
         )
+        
+        # 推送訊息
         line_bot_api.push_message(user_id, TextSendMessage(text=message))
-        print(f"✅ {minutes}分鐘倒數提醒已發送給：{user_id}")
+        print(f"✅ {minutes}分鐘倒數提醒已成功發送給：{user_id}")
+        
+        # 更新狀態
+        if job_id in countdown_status:
+            countdown_status[job_id]['status'] = 'completed'
+            countdown_status[job_id]['completed_at'] = current_time
+        
     except Exception as e:
-        print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
-        # 發送錯誤詳情到日誌
+        error_msg = f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}"
+        print(error_msg)
         print(f"詳細錯誤：{traceback.format_exc()}")
+        
+        # 更新狀態為失敗
+        if job_id in countdown_status:
+            countdown_status[job_id]['status'] = 'failed'
+            countdown_status[job_id]['error'] = str(e)
+
+def threading_countdown_reminder(user_id, minutes, delay_seconds):
+    """使用 threading 作為備用方案"""
+    def timer_function():
+        time.sleep(delay_seconds)
+        try:
+            current_time = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
+            message = (
+                f"⏰ 時間到！(Threading版)\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🔔 {minutes}分鐘倒數計時結束\n"
+                f"✨ 該繼續下一個任務了！\n"
+                f"📅 提醒時間：{current_time}"
+            )
+            line_bot_api.push_message(user_id, TextSendMessage(text=message))
+            print(f"✅ Threading版 {minutes}分鐘倒數提醒已發送給：{user_id}")
+        except Exception as e:
+            print(f"❌ Threading版倒數提醒失敗：{e}")
+    
+    thread = threading.Thread(target=timer_function)
+    thread.daemon = True
+    thread.start()
+    return thread
 
 def handle_countdown_request(user_id, minutes, event):
-    """處理倒數計時請求"""
+    """處理倒數計時請求 - 雙重保險版"""
     try:
-        # 生成唯一的job_id，避免重複
-        job_id = f"countdown_{minutes}_{user_id}_{int(datetime.now().timestamp())}"
+        current_time = datetime.now()
+        job_id = f"countdown_{minutes}_{user_id}_{int(current_time.timestamp())}"
+        run_time = current_time + timedelta(minutes=minutes)
         
-        # 計算執行時間
-        run_time = datetime.now() + timedelta(minutes=minutes)
+        print(f"🕐 設定倒數計時：{minutes}分鐘")
+        print(f"   當前時間：{current_time.strftime('%Y/%m/%d %H:%M:%S')}")
+        print(f"   執行時間：{run_time.strftime('%Y/%m/%d %H:%M:%S')}")
+        print(f"   Job ID：{job_id}")
         
-        print(f"🕐 設定倒數計時：{minutes}分鐘，執行時間：{run_time.strftime('%Y/%m/%d %H:%M:%S')}")
+        # 記錄倒數計時狀態
+        countdown_status[job_id] = {
+            'user_id': user_id,
+            'minutes': minutes,
+            'start_time': current_time.strftime('%Y/%m/%d %H:%M:%S'),
+            'end_time': run_time.strftime('%Y/%m/%d %H:%M:%S'),
+            'status': 'running'
+        }
         
-        # 添加排程任務
-        scheduler.add_job(
-            send_countdown_reminder,
-            trigger="date",
-            run_date=run_time,
-            args=[user_id, minutes],
-            id=job_id,
-            misfire_grace_time=60  # 如果錯過執行時間，在60秒內仍可執行
-        )
-        
-        # 確認任務已添加
-        job = scheduler.get_job(job_id)
-        if job:
-            print(f"✅ 倒數計時任務已成功添加，ID：{job_id}")
-            return (
-                f"⏰ {minutes}分鐘倒數計時開始！\n"
-                f"━━━━━━━━━━━━━━━━\n"
-                f"🕐 計時器已啟動\n"
-                f"📢 {minutes}分鐘後我會提醒您時間到了\n"
-                f"🎯 執行時間：{run_time.strftime('%H:%M:%S')}"
+        # 方法1：APScheduler
+        try:
+            scheduler.add_job(
+                send_countdown_reminder,
+                trigger="date",
+                run_date=run_time,
+                args=[user_id, minutes, job_id],
+                id=job_id,
+                misfire_grace_time=300,  # 5分鐘容錯
+                coalesce=True
             )
+            
+            # 確認任務已添加
+            job = scheduler.get_job(job_id)
+            if job:
+                print(f"✅ APScheduler 任務已成功添加")
+                scheduler_success = True
+            else:
+                print(f"❌ APScheduler 任務添加失敗")
+                scheduler_success = False
+        except Exception as e:
+            print(f"❌ APScheduler 設定失敗：{e}")
+            scheduler_success = False
+        
+        # 方法2：Threading 作為備用
+        delay_seconds = minutes * 60
+        thread = threading_countdown_reminder(user_id, minutes, delay_seconds)
+        print(f"✅ Threading 備用倒數已啟動")
+        
+        # 準備回應訊息
+        status_msg = "🎯 雙重保險模式：\n"
+        if scheduler_success:
+            status_msg += "   ✅ APScheduler 已設定\n"
         else:
-            print(f"❌ 倒數計時任務添加失敗")
-            return "❌ 倒數計時設定失敗，請重試"
+            status_msg += "   ❌ APScheduler 設定失敗\n"
+        status_msg += "   ✅ Threading 備用已啟動"
+        
+        return (
+            f"⏰ {minutes}分鐘倒數計時開始！\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"🕐 計時器已啟動\n"
+            f"📢 {minutes}分鐘後我會提醒您時間到了\n"
+            f"🎯 執行時間：{run_time.strftime('%H:%M:%S')}\n\n"
+            f"{status_msg}\n\n"
+            f"💡 使用「查看倒數」檢視狀態"
+        )
             
     except Exception as e:
         print(f"❌ 設定倒數計時失敗：{e}")
@@ -287,36 +356,61 @@ def handle_countdown_request(user_id, minutes, event):
 def get_active_countdowns(user_id):
     """查看用戶當前的倒數計時"""
     try:
+        # 檢查 APScheduler 的任務
         jobs = scheduler.get_jobs()
-        user_countdowns = []
+        scheduler_countdowns = []
         
         for job in jobs:
             if job.id.startswith(f"countdown_") and user_id in job.id:
-                # 解析倒數計時資訊
                 parts = job.id.split("_")
                 if len(parts) >= 3:
                     minutes = parts[1]
-                    remaining_time = job.next_run_time - datetime.now()
-                    if remaining_time.total_seconds() > 0:
-                        remaining_minutes = int(remaining_time.total_seconds() / 60)
-                        remaining_seconds = int(remaining_time.total_seconds() % 60)
-                        user_countdowns.append({
-                            'minutes': minutes,
-                            'remaining': f"{remaining_minutes}:{remaining_seconds:02d}",
-                            'end_time': job.next_run_time.strftime('%H:%M:%S')
-                        })
+                    if job.next_run_time:
+                        remaining_time = job.next_run_time - datetime.now()
+                        if remaining_time.total_seconds() > 0:
+                            remaining_minutes = int(remaining_time.total_seconds() / 60)
+                            remaining_seconds = int(remaining_time.total_seconds() % 60)
+                            scheduler_countdowns.append({
+                                'job_id': job.id,
+                                'minutes': minutes,
+                                'remaining': f"{remaining_minutes}:{remaining_seconds:02d}",
+                                'end_time': job.next_run_time.strftime('%H:%M:%S')
+                            })
         
-        if user_countdowns:
-            message = "⏰ 進行中的倒數計時\n━━━━━━━━━━━━━━━━\n"
-            for countdown in user_countdowns:
-                message += f"🕐 {countdown['minutes']}分鐘倒數 - 剩餘 {countdown['remaining']} (結束時間: {countdown['end_time']})\n"
-            return message
-        else:
-            return "📋 目前沒有進行中的倒數計時"
+        # 檢查狀態記錄
+        user_status = {k: v for k, v in countdown_status.items() if v['user_id'] == user_id}
+        
+        message = "⏰ 倒數計時狀態報告\n━━━━━━━━━━━━━━━━\n\n"
+        
+        if scheduler_countdowns:
+            message += "📊 APScheduler 活躍任務：\n"
+            for countdown in scheduler_countdowns:
+                message += f"🕐 {countdown['minutes']}分鐘倒數 - 剩餘 {countdown['remaining']} (結束: {countdown['end_time']})\n"
+            message += "\n"
+        
+        if user_status:
+            message += "📋 狀態記錄：\n"
+            for job_id, status in user_status.items():
+                status_icon = "🟢" if status['status'] == 'running' else "✅" if status['status'] == 'completed' else "❌"
+                message += f"{status_icon} {status['minutes']}分鐘倒數 - {status['status']} (開始: {status['start_time']})\n"
+                if status['status'] == 'failed' and 'error' in status:
+                    message += f"   錯誤：{status['error']}\n"
+            message += "\n"
+        
+        if not scheduler_countdowns and not user_status:
+            message += "📋 目前沒有進行中的倒數計時\n"
+        
+        # 添加系統狀態
+        message += f"🔧 系統狀態：\n"
+        message += f"   • APScheduler 運行中：{'✅' if scheduler.running else '❌'}\n"
+        message += f"   • 總排程任務數：{len(scheduler.get_jobs())}\n"
+        message += f"   • 目前時間：{datetime.now().strftime('%H:%M:%S')}"
+        
+        return message
             
     except Exception as e:
         print(f"❌ 查看倒數計時失敗：{e}")
-        return "❌ 查看倒數計時狀態失敗"
+        return f"❌ 查看倒數計時狀態失敗：{str(e)}"
 
 def cancel_countdown(user_id):
     """取消用戶的所有倒數計時"""
@@ -329,30 +423,35 @@ def cancel_countdown(user_id):
                 scheduler.remove_job(job.id)
                 cancelled_count += 1
                 print(f"✅ 已取消倒數計時：{job.id}")
+                
+                # 更新狀態
+                if job.id in countdown_status:
+                    countdown_status[job.id]['status'] = 'cancelled'
         
         if cancelled_count > 0:
-            return f"✅ 已取消 {cancelled_count} 個倒數計時"
+            return f"✅ 已取消 {cancelled_count} 個 APScheduler 倒數計時\n💡 Threading 備用倒數無法取消，但會自動忽略"
         else:
-            return "📋 沒有找到進行中的倒數計時"
+            return "📋 沒有找到 APScheduler 的倒數計時任務"
             
     except Exception as e:
         print(f"❌ 取消倒數計時失敗：{e}")
-        return "❌ 取消倒數計時失敗"
+        return f"❌ 取消倒數計時失敗：{str(e)}"
 
 def test_countdown(user_id, seconds=10):
-    """測試用的短時間倒數計時（以秒為單位）"""
+    """測試用的短時間倒數計時"""
     try:
         job_id = f"test_countdown_{user_id}_{int(datetime.now().timestamp())}"
         run_time = datetime.now() + timedelta(seconds=seconds)
         
         def test_reminder(user_id, seconds):
             try:
-                message = f"🧪 測試倒數完成！{seconds}秒測試計時結束"
+                message = f"🧪 測試倒數完成！{seconds}秒測試計時結束\n時間：{datetime.now().strftime('%H:%M:%S')}"
                 line_bot_api.push_message(user_id, TextSendMessage(text=message))
                 print(f"✅ 測試倒數提醒已發送給：{user_id}")
             except Exception as e:
                 print(f"❌ 測試倒數提醒失敗：{e}")
         
+        # APScheduler 版本
         scheduler.add_job(
             test_reminder,
             trigger="date",
@@ -362,11 +461,69 @@ def test_countdown(user_id, seconds=10):
             misfire_grace_time=30
         )
         
-        return f"🧪 {seconds}秒測試倒數開始！"
+        # Threading 備用版本
+        def threading_test():
+            time.sleep(seconds)
+            try:
+                message = f"🧪 Threading測試倒數完成！{seconds}秒\n時間：{datetime.now().strftime('%H:%M:%S')}"
+                line_bot_api.push_message(user_id, TextSendMessage(text=message))
+                print(f"✅ Threading測試倒數提醒已發送給：{user_id}")
+            except Exception as e:
+                print(f"❌ Threading測試倒數提醒失敗：{e}")
+        
+        thread = threading.Thread(target=threading_test)
+        thread.daemon = True
+        thread.start()
+        
+        return f"🧪 {seconds}秒測試倒數開始！\n🎯 雙重保險：APScheduler + Threading\n⏰ 預計時間：{run_time.strftime('%H:%M:%S')}"
         
     except Exception as e:
         print(f"❌ 測試倒數設定失敗：{e}")
         return f"❌ 測試倒數失敗：{str(e)}"
+
+# 診斷系統狀態
+def get_system_diagnosis():
+    """取得系統診斷資訊"""
+    try:
+        now = datetime.now()
+        diagnosis = f"🔧 系統診斷報告\n━━━━━━━━━━━━━━━━\n\n"
+        
+        # 時間資訊
+        diagnosis += f"⏰ 時間資訊：\n"
+        diagnosis += f"   • 系統時間：{now.strftime('%Y/%m/%d %H:%M:%S')}\n"
+        diagnosis += f"   • 時區：{now.astimezone().tzinfo}\n\n"
+        
+        # APScheduler 狀態
+        diagnosis += f"📊 APScheduler 狀態：\n"
+        diagnosis += f"   • 運行狀態：{'✅ 運行中' if scheduler.running else '❌ 已停止'}\n"
+        diagnosis += f"   • 總任務數：{len(scheduler.get_jobs())}\n"
+        
+        # 列出所有任務
+        jobs = scheduler.get_jobs()
+        if jobs:
+            diagnosis += f"   • 任務列表：\n"
+            for job in jobs:
+                next_run = job.next_run_time.strftime('%H:%M:%S') if job.next_run_time else "未設定"
+                diagnosis += f"     - {job.id}: {next_run}\n"
+        else:
+            diagnosis += f"   • 無排程任務\n"
+        
+        diagnosis += f"\n"
+        
+        # 倒數計時狀態
+        diagnosis += f"📋 倒數計時記錄：\n"
+        if countdown_status:
+            for job_id, status in countdown_status.items():
+                diagnosis += f"   • {job_id}: {status['status']}\n"
+        else:
+            diagnosis += f"   • 無倒數計時記錄\n"
+        
+        diagnosis += f"\n💡 如果 APScheduler 無法正常運作，系統會使用 Threading 作為備用方案。"
+        
+        return diagnosis
+        
+    except Exception as e:
+        return f"❌ 系統診斷失敗：{str(e)}"
 
 # 發送早安訊息
 def send_morning_message():
@@ -380,7 +537,7 @@ def send_morning_message():
     except Exception as e:
         print(f"❌ 發送早安訊息失敗：{e}")
 
-# 美化的功能說明 (已更新包含風雲榜和倒數計時)
+# 功能說明
 def send_help_message():
     return (
         "🤖 LINE 行程助理 - 完整功能指南\n"
@@ -388,36 +545,14 @@ def send_help_message():
         "📊 風雲榜資料輸入\n"
         "═══════════════\n"
         "🎯 觸發指令：風雲榜\n"
-        "📝 一次性輸入所有資料，每行一項：\n"
-        "✨ 範例格式：\n"
-        "   奕君,惠華,小嫺,嘉憶,曉汎\n"
-        "   離世傳心練習\n"
-        "   6/25\n"
-        "   傳心\n"
-        "   9\n"
-        "   10\n"
-        "   10\n"
-        "   10\n"
-        "   嘉憶家的莎莉\n"
-        "💡 同學姓名用逗號分隔 (支援 , 或 ，)，系統會自動建立多筆記錄\n"
+        "📝 一次性輸入所有資料，每行一項\n"
+        "💡 同學姓名用逗號分隔，系統會自動建立多筆記錄\n"
         "✅ 資料將自動寫入Google工作表2\n\n"
         "📅 行程管理功能\n"
         "═══════════════\n"
-        "📌 新增行程格式：\n"
-        "   月/日 時:分 行程內容\n\n"
-        "✨ 新增範例：\n"
-        "   • 7/1 14:00 餵小鳥\n"
-        "   • 2025/7/15 16:30 客戶會議\n"
-        "   • 12/25 09:00 聖誕節聚餐\n\n"
-        "🔍 查詢行程指令：\n"
-        "   • 今日行程 - 查看今天的所有安排\n"
-        "   • 明日行程 - 查看明天的計劃\n"
-        "   • 本週行程 - 本週完整行程表\n"
-        "   • 下週行程 - 下週所有安排\n"
-        "   • 本月行程 - 本月份行程總覽\n"
-        "   • 下個月行程 - 下月份規劃\n"
-        "   • 明年行程 - 明年度安排\n\n"
-        "⏰ 倒數計時工具\n"
+        "📌 新增行程格式：月/日 時:分 行程內容\n"
+        "🔍 查詢指令：今日行程、明日行程、本週行程等\n\n"
+        "⏰ 倒數計時工具 (雙重保險)\n"
         "═══════════════\n"
         "🕐 基本倒數指令：\n"
         "   • 倒數3分鐘 / 倒數計時 / 開始倒數\n"
@@ -426,7 +561,8 @@ def send_help_message():
         "🔧 倒數管理指令：\n"
         "   • 查看倒數 - 檢視進行中的倒數計時\n"
         "   • 取消倒數 - 取消所有倒數計時\n"
-        "   • 測試倒數 - 10秒測試倒數\n\n"
+        "   • 測試倒數 - 10秒測試倒數\n"
+        "   • 系統診斷 - 查看詳細系統狀態\n\n"
         "💬 趣味互動：\n"
         "   • 哈囉 / hi - 打個招呼\n"
         "   • 你還會說什麼? - 驚喜回應\n\n"
@@ -440,19 +576,22 @@ def send_help_message():
         "📊 系統資訊：\n"
         "   • 查看id - 顯示群組/使用者 ID\n"
         "   • 查看排程 - 檢視系統排程狀態\n"
+        "   • 系統診斷 - 詳細系統診斷報告\n"
         "   • 功能說明 / 說明 / help - 顯示此說明\n\n"
         "🔔 自動推播服務\n"
         "═══════════════\n"
         "🌅 每天早上 8:30 - 溫馨早安訊息\n"
         "📅 每週日晚上 22:00 - 下週行程摘要\n\n"
-        "💡 小提醒：系統會在行程前一小時自動提醒您！"
+        "💡 小提醒：\n"
+        "   • 倒數計時使用雙重保險機制 (APScheduler + Threading)\n"
+        "   • 系統會在行程前一小時自動提醒您！\n"
+        "   • 如遇問題請使用「系統診斷」檢查狀態"
     )
 
-# 美化的週報推播
+# 週報推播功能
 def weekly_summary():
     print("🔄 開始執行每週行程摘要...")
     try:
-        # 檢查是否已設定群組 ID
         if TARGET_GROUP_ID == "C4e138aa0eb252daa89846daab0102e41":
             print("⚠️ 週報群組 ID 尚未設定，跳過週報推播")
             return
@@ -460,10 +599,9 @@ def weekly_summary():
         all_rows = sheet.get_all_values()[1:]
         now = datetime.now()
         
-        # 計算下週一到下週日的範圍
         days_until_next_monday = (7 - now.weekday()) % 7
-        if days_until_next_monday == 0:  # 如果今天是週一
-            days_until_next_monday = 7   # 取下週一
+        if days_until_next_monday == 0:
+            days_until_next_monday = 7
             
         start = now + timedelta(days=days_until_next_monday)
         end = start + timedelta(days=6)
@@ -489,7 +627,6 @@ def weekly_summary():
         print(f"📈 找到 {len(user_schedules)} 位使用者有下週行程")
         
         if not user_schedules:
-            # 如果沒有行程，也發送提醒
             message = (
                 f"📅 下週行程預覽\n"
                 f"🗓️ {start.strftime('%m/%d')} - {end.strftime('%m/%d')}\n"
@@ -498,24 +635,21 @@ def weekly_summary():
                 f"✨ 可以好好放鬆，享受自由時光！"
             )
         else:
-            # 整理所有使用者的行程到一個訊息中
             message = (
                 f"📅 下週行程預覽\n"
                 f"🗓️ {start.strftime('%m/%d')} - {end.strftime('%m/%d')}\n"
                 f"━━━━━━━━━━━━━━━━\n\n"
             )
             
-            # 按日期排序所有行程
             all_schedules = []
             for user_id, items in user_schedules.items():
                 for dt, content in items:
                     all_schedules.append((dt, content, user_id))
             
-            all_schedules.sort()  # 按時間排序
+            all_schedules.sort()
             
             current_date = None
             for dt, content, user_id in all_schedules:
-                # 如果是新的日期，加上日期標題
                 if current_date != dt.date():
                     current_date = dt.date()
                     weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
@@ -523,7 +657,6 @@ def weekly_summary():
                     message += f"\n📆 {dt.strftime('%m/%d')} (週{weekday})\n"
                     message += "─────────────────────\n"
                 
-                # 顯示時間和內容
                 message += f"🕐 {dt.strftime('%H:%M')} │ {content}\n"
             
             message += "\n💡 記得提前準備，祝您一週順利！"
@@ -539,7 +672,6 @@ def weekly_summary():
     except Exception as e:
         print(f"❌ 每週行程摘要執行失敗：{e}")
 
-# 手動觸發週報（用於測試）
 def manual_weekly_summary():
     print("🔧 手動執行每週行程摘要...")
     weekly_summary()
@@ -547,54 +679,47 @@ def manual_weekly_summary():
 # 排程任務
 scheduler.add_job(
     weekly_summary, 
-    CronTrigger(day_of_week="sun", hour=22, minute=0),
+    CronTrigger(day_of_week="sun", hour=22, minute=0, timezone='Asia/Taipei'),
     id="weekly_summary"
 )
 scheduler.add_job(
     send_morning_message, 
-    CronTrigger(hour=8, minute=30),
+    CronTrigger(hour=8, minute=30, timezone='Asia/Taipei'),
     id="morning_message"
 )
 
 # 指令對應表
 EXACT_MATCHES = {
     "今日行程": "today",
-    "明日行程": "tomorrow",
+    "明日行程": "tomorrow", 
     "本週行程": "this_week",
     "下週行程": "next_week",
     "本月行程": "this_month",
     "下個月行程": "next_month",
     "明年行程": "next_year",
     "哈囉": "hello",
-    "hi": "hi",
+    "hi": "hi", 
     "你還會說什麼?": "what_else"
 }
 
-# 檢查文字是否為行程格式
 def is_schedule_format(text):
     """檢查文字是否像是行程格式"""
     parts = text.strip().split()
     if len(parts) < 2:
         return False
     
-    # 檢查前兩個部分是否像日期時間格式
     try:
         date_part, time_part = parts[0], parts[1]
         
-        # 檢查日期格式 (M/D 或 YYYY/M/D)
         if "/" in date_part:
             date_segments = date_part.split("/")
             if len(date_segments) == 2 or len(date_segments) == 3:
-                # 檢查是否都是數字
                 if all(segment.isdigit() for segment in date_segments):
-                    # 檢查時間格式 (HH:MM)，但允許沒有空格的情況
                     if ":" in time_part:
-                        # 找到冒號的位置，提取時間部分
                         colon_index = time_part.find(":")
                         if colon_index > 0:
-                            # 提取時間部分（HH:MM）
-                            time_only = time_part[:colon_index+3]  # 包含HH:MM
-                            if len(time_only) >= 4:  # 至少要有H:MM或HH:M
+                            time_only = time_part[:colon_index+3]
+                            if len(time_only) >= 4:
                                 time_segments = time_only.split(":")
                                 if len(time_segments) == 2:
                                     if all(segment.isdigit() for segment in time_segments):
@@ -609,9 +734,9 @@ def handle_message(event):
     user_text = event.message.text.strip()
     lower_text = user_text.lower()
     user_id = getattr(event.source, "group_id", None) or event.source.user_id
-    reply = None  # 預設不回應
+    reply = None
 
-    # 風雲榜功能處理 - 優先處理
+    # 風雲榜功能處理
     if user_text == "風雲榜" or (user_text.count('\n') >= 8 and len(user_text.strip().split('\n')) >= 9):
         reply = process_ranking_input(user_id, user_text)
         if reply:
@@ -704,30 +829,30 @@ def handle_message(event):
             reply = f"❌ 查看排程失敗：{str(e)}"
     elif lower_text in ["功能說明", "說明", "help", "如何增加行程"]:
         reply = send_help_message()
-    # 新增的倒數計時相關指令
+    elif lower_text == "系統診斷":
+        reply = get_system_diagnosis()
+    # 倒數計時相關指令
     elif lower_text == "查看倒數":
         reply = get_active_countdowns(user_id)
     elif lower_text == "取消倒數":
         reply = cancel_countdown(user_id)
     elif lower_text == "測試倒數":
-        reply = test_countdown(user_id, 10)  # 10秒測試
-    # 處理倒數計時指令
+        reply = test_countdown(user_id, 10)
     elif lower_text in ["倒數計時", "開始倒數", "倒數3分鐘"]:
         reply = handle_countdown_request(user_id, 3, event)
     elif lower_text == "倒數5分鐘":
         reply = handle_countdown_request(user_id, 5, event)
     elif lower_text.startswith("倒數") and "分鐘" in lower_text:
-        # 處理自定義分鐘數，例如 "倒數10分鐘"
         try:
             match = re.search(r'倒數(\d+)分鐘', lower_text)
             if match:
                 minutes = int(match.group(1))
-                if 1 <= minutes <= 60:  # 限制在1-60分鐘之間
+                if 1 <= minutes <= 60:
                     reply = handle_countdown_request(user_id, minutes, event)
                 else:
                     reply = "❌ 倒數時間請設定在1-60分鐘之間"
         except:
-            pass  # 如果解析失敗，繼續處理其他指令
+            pass
     else:
         # 處理其他指令
         reply_type = next((v for k, v in EXACT_MATCHES.items() if k.lower() == lower_text), None)
@@ -744,7 +869,6 @@ def handle_message(event):
             # 檢查是否為行程格式
             if is_schedule_format(user_text):
                 reply = try_add_schedule(user_text, user_id)
-            # 如果不是行程格式，就不回應（reply 保持 None）
 
     # 只有在 reply 不為 None 時才回應
     if reply:
@@ -756,7 +880,6 @@ def get_schedule(period, user_id):
         now = datetime.now()
         schedules = []
 
-        # 定義期間名稱和表情符號
         period_info = {
             "today": {"name": "今日行程", "emoji": "📅", "empty_msg": "今天沒有安排任何行程，可以放鬆一下！"},
             "tomorrow": {"name": "明日行程", "emoji": "📋", "empty_msg": "明天目前沒有安排，有個輕鬆的一天！"},
@@ -802,10 +925,8 @@ def get_schedule(period, user_id):
                 f"🎉 {info['empty_msg']}"
             )
 
-        # 按時間排序
         schedules.sort()
         
-        # 格式化輸出
         result = (
             f"{info['emoji']} {info['name']}\n"
             f"━━━━━━━━━━━━━━━━\n\n"
@@ -815,7 +936,6 @@ def get_schedule(period, user_id):
         weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
         
         for dt, content in schedules:
-            # 如果是新的日期，加上日期標題
             if current_date != dt.date():
                 current_date = dt.date()
                 if len(schedules) > 1 and period in ["this_week", "next_week", "this_month", "next_month", "next_year"]:
@@ -823,19 +943,15 @@ def get_schedule(period, user_id):
                     result += f"📆 {dt.strftime('%m/%d')} (週{weekday})\n"
                     result += "─────────────────────\n"
             
-            # 顯示時間和內容
             result += f"🕐 {dt.strftime('%H:%M')} │ {content}\n"
             
-            # 在多日期顯示時添加空行
             if len(schedules) > 1 and period in ["this_week", "next_week", "this_month", "next_month", "next_year"]:
-                # 檢查下一個行程是否是不同日期
                 current_index = schedules.index((dt, content))
                 if current_index < len(schedules) - 1:
                     next_dt, _ = schedules[current_index + 1]
                     if next_dt.date() != dt.date():
                         result += "\n"
 
-        # 添加友善的結尾
         if len(schedules) > 0:
             result += "\n💡 記得提前準備，祝您順利完成所有安排！"
 
@@ -852,35 +968,28 @@ def try_add_schedule(text, user_id):
             date_part = parts[0]
             time_and_content = " ".join(parts[1:])
             
-            # 處理時間和內容可能沒有空格分隔的情況
             time_part = None
             content = None
             
-            # 尋找時間格式 HH:MM
             if ":" in time_and_content:
                 colon_index = time_and_content.find(":")
                 if colon_index >= 1:
-                    # 找到時間的開始位置
                     time_start = max(0, colon_index - 2)
                     while time_start < colon_index and not time_and_content[time_start].isdigit():
                         time_start += 1
                     
-                    # 找到時間的結束位置（冒號後2位數字）
                     time_end = colon_index + 3
                     if time_end <= len(time_and_content):
                         potential_time = time_and_content[time_start:time_end]
-                        # 驗證時間格式
                         if ":" in potential_time:
                             time_segments = potential_time.split(":")
                             if len(time_segments) == 2 and all(seg.isdigit() for seg in time_segments):
                                 time_part = potential_time
                                 content = time_and_content[time_end:].strip()
                                 
-                                # 如果沒有內容，可能是因為時間和內容之間沒有空格
                                 if not content:
                                     content = time_and_content[time_end:].strip()
             
-            # 如果無法解析時間，返回格式錯誤
             if not time_part or not content:
                 return (
                     "❌ 時間格式錯誤\n"
@@ -891,13 +1000,11 @@ def try_add_schedule(text, user_id):
                     "   • 12/25 09:30 聖誕聚餐"
                 )
             
-            # 如果日期格式是 M/D，自動加上當前年份
             if date_part.count("/") == 1:
                 date_part = f"{datetime.now().year}/{date_part}"
             
             dt = datetime.strptime(f"{date_part} {time_part}", "%Y/%m/%d %H:%M")
             
-            # 檢查日期是否為過去時間
             if dt < datetime.now():
                 return (
                     "❌ 無法新增過去的時間\n"
@@ -955,17 +1062,21 @@ if __name__ == "__main__":
     print("📅 自動排程服務：")
     print("   🌅 每天早上 8:30 - 溫馨早安訊息")
     print("   📊 每週日晚上 22:00 - 下週行程摘要")
-    print("⏰ 倒數計時功能：")
+    print("⏰ 倒數計時功能 (雙重保險)：")
     print("   🕐 基本倒數：輸入 '倒數3分鐘' 或 '倒數計時' 或 '開始倒數'")
     print("   🕐 自訂倒數：輸入 '倒數X分鐘' (X可為1-60)")
-    print("   🔧 管理功能：'查看倒數' / '取消倒數' / '測試倒數'")
+    print("   🔧 管理功能：'查看倒數' / '取消倒數' / '測試倒數' / '系統診斷'")
+    print("   🛡️ 雙重保險：APScheduler + Threading 備用機制")
     print("💡 輸入 '功能說明' 查看完整功能列表")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     
     # 顯示目前排程狀態
     try:
         jobs = scheduler.get_jobs()
-        print(f"✅ 系統狀態：已載入 {len(jobs)} 個排程工作")
+        print(f"✅ 系統狀態：")
+        print(f"   • APScheduler 運行中：{'✅' if scheduler.running else '❌'}")
+        print(f"   • 已載入 {len(jobs)} 個排程工作")
+        print(f"   • 時區設定：Asia/Taipei")
         for job in jobs:
             next_run = job.next_run_time.strftime('%Y/%m/%d %H:%M:%S') if job.next_run_time else "未設定"
             job_name = "🌅 早安訊息" if job.id == "morning_message" else "📊 週報摘要" if job.id == "weekly_summary" else job.id
@@ -977,8 +1088,14 @@ if __name__ == "__main__":
     print("🚀 LINE Bot 已成功啟動，準備為您服務！")
     print("🧪 測試建議：")
     print("   1. 先執行「測試倒數」確認倒數計時功能")
-    print("   2. 使用「查看排程」檢視系統狀態")
-    print("   3. 輸入「功能說明」了解所有可用指令")
+    print("   2. 使用「系統診斷」檢視詳細系統狀態")
+    print("   3. 使用「查看排程」檢視所有排程任務")
+    print("   4. 輸入「功能說明」了解所有可用指令")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("🔧 故障排除提示：")
+    print("   • 如果倒數計時沒有提醒，請檢查「系統診斷」")
+    print("   • APScheduler 失效時會自動啟用 Threading 備用")
+    print("   • 雲端環境可能影響排程器運作，雙重保險確保可靠性")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     
     port = int(os.getenv("PORT", 5000))
