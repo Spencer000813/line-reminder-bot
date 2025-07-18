@@ -1,5 +1,6 @@
 import os
 import json
+import random
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 
@@ -40,6 +41,9 @@ RANKING_SPREADSHEET_ID = "1LkPCLbaw5wmPao9g2mMEMRT7eklteR-6RLaJNYP8OQA"
 WORKSHEET_NAME = "工作表2"
 ranking_data = {}  # 風雲榜資料暫存
 
+# 🆕 抽籤功能 - 抽籤名單
+LOTTERY_NAMES = ["奕君", "小嫺", "嘉憶", "惠華"]
+
 @app.route("/")
 def home():
     return "LINE Reminder Bot is running."
@@ -53,6 +57,32 @@ def callback():
     except InvalidSignatureError:
         abort(400)
     return "OK"
+
+# 🆕 抽籤功能
+def process_lottery(command):
+    """處理抽籤指令"""
+    try:
+        # 解析抽籤指令
+        if command.startswith("抽") and len(command) == 2:
+            number_str = command[1]
+            if number_str.isdigit():
+                number = int(number_str)
+                
+                # 檢查抽籤數量是否有效 (限制最多抽3位)
+                if number < 1 or number > 3:
+                    return "請輸入抽1到抽3"
+                
+                # 進行抽籤
+                selected = random.sample(LOTTERY_NAMES, number)
+                
+                # 簡潔輸出，直接顯示名字
+                return "、".join(selected)
+                
+        return None
+        
+    except Exception as e:
+        print(f"❌ 抽籤處理失敗：{e}")
+        return "抽籤系統發生錯誤"
 
 # 🆕 新增：檢查並發送待發送的行程提醒
 def check_and_send_pending_reminders():
@@ -333,11 +363,19 @@ def send_countdown_reminder(user_id, minutes):
     except Exception as e:
         print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
 
-# 美化的功能說明 (已更新包含風雲榜)
+# 美化的功能說明 (已更新包含風雲榜和抽籤)
 def send_help_message():
     return (
         "🤖 LINE 行程助理 - 完整功能指南\n"
         "━━━━━━━━━━━━━━━━\n\n"
+        "🎲 抽籤功能\n"
+        "═══════════════\n"
+        "🎯 參與名單：奕君、小嫺、嘉憶、惠華\n"
+        "🎪 抽籤指令：\n"
+        "   • 抽1 - 抽出1位同學\n"
+        "   • 抽2 - 抽出2位同學\n"
+        "   • 抽3 - 抽出3位同學\n"
+        "💡 直接顯示抽中的名字\n\n"
         "📊 風雲榜資料輸入\n"
         "═══════════════\n"
         "🎯 觸發指令：風雲榜\n"
@@ -570,6 +608,13 @@ def handle_message(event):
     lower_text = user_text.lower()
     user_id = getattr(event.source, "group_id", None) or event.source.user_id
     reply = None  # 預設不回應
+
+    # 🆕 抽籤功能處理 - 優先處理
+    if user_text.startswith("抽") and len(user_text) == 2:
+        reply = process_lottery(user_text)
+        if reply:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+            return
 
     # 風雲榜功能處理 - 優先處理，並且只在有效格式時處理
     if is_valid_ranking_format(user_text):
@@ -925,6 +970,10 @@ def try_add_schedule(text, user_id):
 if __name__ == "__main__":
     print("🤖 LINE 行程助理啟動中...")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("🎲 抽籤功能：")
+    print("   🎯 抽籤名單：奕君、小嫺、嘉憶、惠華")
+    print("   🎪 抽籤指令：抽1、抽2、抽3")
+    print("   💡 直接顯示抽中的名字")
     print("📊 風雲榜功能：")
     print("   🎯 輸入 '風雲榜' 查看使用說明")
     print("   📝 完全吻合9行格式時才會處理")
