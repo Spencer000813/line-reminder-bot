@@ -363,7 +363,7 @@ def send_countdown_reminder(user_id, minutes):
     except Exception as e:
         print(f"❌ 推播{minutes}分鐘倒數提醒失敗：{e}")
 
-# 美化的功能說明 (已更新包含風雲榜和抽籤)
+# 美化的功能說明 (🆕 已更新包含1分鐘倒數)
 def send_help_message():
     return (
         "🤖 LINE 行程助理 - 完整功能指南\n"
@@ -411,6 +411,7 @@ def send_help_message():
         "⏰ 實用工具\n"
         "═══════════════\n"
         "🕐 倒數計時功能：\n"
+        "   • 倒數1分鐘 - 快速1分鐘倒數\n"
         "   • 倒數3分鐘 / 倒數計時 / 開始倒數\n"
         "   • 倒數5分鐘\n\n"
         "💬 趣味互動：\n"
@@ -550,7 +551,7 @@ scheduler.add_job(
     id="pending_reminders"
 )
 
-# 指令對應表
+# 🆕 指令對應表 (新增倒數1分鐘)
 EXACT_MATCHES = {
     "今日行程": "today",
     "明日行程": "tomorrow",
@@ -561,6 +562,7 @@ EXACT_MATCHES = {
     "明年行程": "next_year",
     "倒數計時": "countdown_3",
     "開始倒數": "countdown_3",
+    "倒數1分鐘": "countdown_1",  # 🆕 新增1分鐘倒數
     "倒數3分鐘": "countdown_3",
     "倒數5分鐘": "countdown_5",
     "哈囉": "hello",
@@ -717,6 +719,21 @@ def handle_message(event):
             reply = "👋 呷飽沒？需要安排什麼行程嗎？"
         elif reply_type == "what_else":
             reply = "💕 我愛你 ❤️\n\n還有很多功能等你發現喔！\n輸入「功能說明」查看完整指令列表～"
+        # 🆕 新增1分鐘倒數處理
+        elif reply_type == "countdown_1":
+            reply = (
+                "⏰ 1分鐘倒數計時開始！\n"
+                "━━━━━━━━━━━━━━━━\n"
+                "🕐 計時器已啟動\n"
+                "📢 1分鐘後我會提醒您時間到了"
+            )
+            scheduler.add_job(
+                send_countdown_reminder,
+                trigger="date",
+                run_date=datetime.now() + timedelta(minutes=1),
+                args=[user_id, 1],
+                id=f"countdown_1_{user_id}_{datetime.now().timestamp()}"
+            )
         elif reply_type == "countdown_3":
             reply = (
                 "⏰ 3分鐘倒數計時開始！\n"
@@ -984,6 +1001,7 @@ if __name__ == "__main__":
     print("   📊 每週日晚上 22:00 - 下週行程摘要")
     print("   ⏰ 每分鐘檢查 - 自動行程提醒推播")
     print("⏰ 倒數計時功能：")
+    print("   🕐 倒數1分鐘：輸入 '倒數1分鐘'")  # 🆕 新增啟動訊息
     print("   🕐 倒數3分鐘：輸入 '倒數3分鐘' 或 '倒數計時' 或 '開始倒數'")
     print("   🕐 倒數5分鐘：輸入 '倒數5分鐘'")
     print("🔧 測試指令：")
